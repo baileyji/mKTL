@@ -3,21 +3,21 @@
 # This is a subprocess invoked by an authoritative daemon to save item values
 # in a persistent disk cache, so that item values can remain consistent across
 # restarts of a daemon when desired.
-
 import sys
-import mKTL
 import time
+
+import mktl.get
+import mktl.daemon.persist
 
 
 def main():
-
     if len(sys.argv) != 3:
         raise ValueError('command line arguments are a store and uuid')
 
     store = sys.argv[1]
     uuid = sys.argv[2]
 
-    store = mKTL.get(store)
+    store = mktl.get.get(store)
     matches = 0
     watched = 0
 
@@ -37,9 +37,8 @@ def main():
             continue
 
         if persist == True:
-            item.register(mKTL.Daemon.Persist.save)
+            item.register(mktl.daemon.persist.save)
             watched += 1
-
 
     if matches == 0:
         raise RuntimeError("no items found in '%s' for UUID %s" % (store, uuid))

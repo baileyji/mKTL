@@ -8,7 +8,7 @@ import atexit
 import itertools
 import json
 import os
-import socket
+# import socket
 import subprocess
 import sys
 import tempfile
@@ -16,13 +16,18 @@ import threading
 import time
 import zmq
 
-import mKTL
+import mktl.protocol.publish
+import mktl.protocol.discover
+import mktl.protocol.request
+import mktl.config.cache
+import mktl.config.hash
+
+# import mktl as mKTL
 
 zmq_context = zmq.Context()
 
 
 def main():
-
     ### This is a quick+dirty approach to running up a KTL/mKTL proxy. The real
     ### proxy daemon should be driven by a ConfigParser configuration file,
     ### which defines the name of the store, the proxy subprocess call that
@@ -33,16 +38,16 @@ def main():
 
     names = sys.argv[1:]
 
-    pub = mKTL.Protocol.Publish.Server()
+    pub = mktl.protocol.publish.Server()
     req = RequestServer()
 
-    discovery = mKTL.Protocol.Discover.DirectServer(req.port)
+    discovery = mktl.protocol.discover.DirectServer(req.port)
 
     # Try once to locate any running guide processes and notify them about
     # our unique local configuration. Further discovery of running daemons,
     # as might need to occur after the guide restarts, is their responsibility.
 
-    main.guides = mKTL.Protocol.Discover.search(wait=True)
+    main.guides = mktl.protocol.discover.search(wait=True)
 
     # PUB and REP messages can flow directly from the subprocess out to the
     # external interface without any additional handling; inbound requests
@@ -56,7 +61,6 @@ def main():
     for name in names:
         main.subs[name] = ProxySubprocess(name, req, pub)
 
-
     while True:
 
         try:
@@ -69,33 +73,30 @@ main.subs = dict()
 main.shutdown = threading.Event()
 
 
-
 class InternalRequest:
-    ''' The :class:`InternalRequest` provides a very thin wrapper around a
+    """ The :class:`InternalRequest` provides a very thin wrapper around a
         :class:`threading.Event` that can be used to signal the internal
         caller that the request has been handled. It also provides a vehicle
         for the response to be passed to the caller.
-    '''
+    """
 
     def __init__(self):
         self.event = threading.Event()
 
-
     def complete(self, response):
-        ''' If a response to an internal request arrives the
+        """ If a response to an internal request arrives the
             :class:`RequestRelay` instance will check whether the response
             belongs to an internal request, and if it does, call
             :func:`complete` to indicate the response has arrived.
-        '''
+        """
 
         self.response = response
         self.event.set()
 
-
     def wait(self):
-        ''' The invoker of the :class:`InternalRequest` will call :func:`wait`
+        """ The invoker of the :class:`InternalRequest` will call :func:`wait`
             to block until the request has been handled.
-        '''
+        """
 
         self.event.wait()
         return self.response
@@ -104,9 +105,8 @@ class InternalRequest:
 # end of class InternalRequest
 
 
-
 class ProxySubprocess:
-    ''' The :class:`ProxySubprocess` contains all the elements associated
+    """ The :class:`ProxySubprocess` contains all the elements associated
         with the subprocess handling proxied requests. Those components are:
 
           * The subprocess itself.
@@ -123,7 +123,7 @@ class ProxySubprocess:
 
         The subprocess will be restarted if it stops running for any reason.
         The ZeroMQ sockets created here get re-used if that occurs.
-    '''
+    """
 
     def __init__(self, name, req_server, pub_server):
 
@@ -152,7 +152,6 @@ class ProxySubprocess:
         self.thread.daemon = True
         self.thread.start()
 
-
     def run(self):
 
         self.subprocess = self.startSubprocess()
@@ -169,10 +168,9 @@ class ProxySubprocess:
             ### This should log appropriately, and probably check for some sort
             ### of broader indicator that we should no longer be running.
 
-            print('Proxy subprocess died for ' + self.name)
+            print('proxy subprocess died for ' + self.name)
             time.sleep(10)
             self.subprocess = self.startSubprocess()
-
 
     def reconfig(self):
 
@@ -194,7 +192,6 @@ class ProxySubprocess:
             exception.add_note('Original traceback:')
             exception.add_note(error['debug'])
             raise exception
-
 
         # Pass the new configuration upstream so it can be cached for future
         # queries. Reaching in here feels a bit like too much close coupling;
@@ -220,10 +217,8 @@ class ProxySubprocess:
 
         # Distribute what we know to any established guides.
 
-        for address,port in main.guides:
+        for address, port in main.guides:
             send_configuration(address, port)
-
-
 
     def startSubprocess(self):
 
@@ -244,18 +239,16 @@ class ProxySubprocess:
 # end of class ProxySubprocess
 
 
-
 class PublishRelay:
-    ''' A :class:`PublishRelay` instance acts as a direct conduit for broadcasts
+    """ A :class:`PublishRelay` instance acts as a direct conduit for broadcasts
         published by the subprocess, relaying them unchanged to the external
         interface.
 
         This is accomplished very efficiently by :func:`zmq.proxy`, which means
         we are not inspecting or modifying any broadcasts as part of the relay.
-    '''
+    """
 
     def __init__(self, internal, external):
-
         self.external = external
 
         self.internal = internal
@@ -276,16 +269,15 @@ class PublishRelay:
 # end of class PublishRelay
 
 
-
 class RequestRelay:
-    ''' A :class:`RequestRelay` instance receives requests from the external
+    """ A :class:`RequestRelay` instance receives requests from the external
         interface and redirects them to the subprocess; likewise, it redirects
         responses back to the external interface.
 
         Requests have locally unique internal identifier numbers, which implies
         the need to remap external request numbers to something locally unique,
         and back again for the response.
-    '''
+    """
 
     req_id_min = 0
     req_id_max = 0xFFFFFFFF
@@ -309,11 +301,10 @@ class RequestRelay:
         self.thread.daemon = True
         self.thread.start()
 
-
     def external_request(self, ident, request):
-        ''' Relay a request from the external interface to our subprocess for
+        """ Relay a request from the external interface to our subprocess for
             proper handling.
-        '''
+        """
 
         # Preserve the original id and ident for the future response. The
         # request id must be remapped to a value that is locally unique;
@@ -334,11 +325,10 @@ class RequestRelay:
         self.internal_socket.send(request)
         self.internal_socket_lock.release()
 
-
     def internal_request(self, request):
-        ''' Issue an internal request to a subprocess, via the subprocess
+        """ Issue an internal request to a subprocess, via the subprocess
             request socket. Return the response to the caller.
-        '''
+        """
 
         req_id = self.req_id_next()
         request['id'] = req_id
@@ -364,13 +354,12 @@ class RequestRelay:
 
         return response
 
-
     def req_id_next(self):
-        ''' Return the next request identification number for subroutines to
+        """ Return the next request identification number for subroutines to
             use when relaying a request. Internal requests are assigned a
             number; external requests have their original identifier mapped to
             a locally unique identifier.
-        '''
+        """
 
         self.req_id_lock.acquire()
         req_id = next(self.req_id)
@@ -386,13 +375,11 @@ class RequestRelay:
         self.req_id_lock.release()
         return req_id
 
-
     def req_id_reset(self):
-        ''' Reset the publication identification number to the minimum value.
-        '''
+        """ Reset the publication identification number to the minimum value.
+        """
 
         self.req_id = itertools.count(self.req_id_min)
-
 
     def run(self):
 
@@ -451,24 +438,22 @@ class RequestRelay:
 # end of class RequestRelay
 
 
-
-class RequestServer(mKTL.Protocol.Request.Server):
-    ''' Subclass the generic :class:mKTL.Protocol.Request.Server`, adding
+class RequestServer(mktl.protocol.request.Server):
+    """ Subclass the generic :class:mKTL.protocol.Request.Server`, adding
         additional logic to locally handle CONFIG requests, and to determine
         which proxied subprocess should receive the incoming request.
-    '''
+    """
 
     def req_config(self, ident, request):
-        ''' Return a configuration block for the requested store name. The
+        """ Return a configuration block for the requested store name. The
             configuration blocks are stored locally every time a subprocess
             starts running.
-        '''
+        """
 
         try:
             request_name = request['name']
         except KeyError:
             raise KeyError('CONFIG request must specify a name')
-
 
         try:
             data = request['data']
@@ -479,24 +464,23 @@ class RequestServer(mKTL.Protocol.Request.Server):
             # Cache the information, and return an empty dict to indicate
             # the requested operation is complete.
 
-            mKTL.Config.Cache.add(request_name, data)
+            mktl.config.cache.add(request_name, data)
             return dict()
 
         try:
-            data = mKTL.Config.Cache.get(request_name)
+            data = mktl.config.cache.get(request_name)
         except KeyError:
             raise KeyError('no local configuration for ' + repr(request_name))
 
-        payload = mKTL.Config.Cache.get(request_name)
+        payload = mktl.config.cache.get(request_name)
         return payload
 
-
     def req_handler(self, socket, lock, ident, request):
-        ''' Inspect the incoming request type and decide how a response
+        """ Inspect the incoming request type and decide how a response
             will be generated. Interactive requests are handled exclusively
             by the subprocess, including the ACK of the request; other request
             types are handled immediately via subroutines called here.
-        '''
+        """
 
         try:
             type = request['request']
@@ -535,26 +519,24 @@ class RequestServer(mKTL.Protocol.Request.Server):
 
         return payload
 
-
     def req_hash(self, ident, request):
-        ''' Return the hash of a configuration block for a requested store name,
+        """ Return the hash of a configuration block for a requested store name,
             or all hashes for all locally known stores.
-        '''
+        """
 
         try:
             name = request['name']
         except KeyError:
             name = None
 
-        cached = mKTL.Config.Hash.get(name)
+        cached = mktl.config.hash.get(name)
         return cached
 
-
     def req_relay(self, ident, request):
-        ''' Relay the incoming GET or SET request to the correct subprocess.
+        """ Relay the incoming GET or SET request to the correct subprocess.
             The :class:`RequestRelay` instance associated with that subprocess
             handles the communication in both directions.
-        '''
+        """
 
         # The request could be for one of any of the stores associated with
         # this proxy. We have to know the store name to know which subprocess
@@ -574,7 +556,6 @@ class RequestServer(mKTL.Protocol.Request.Server):
 # end of class RequestServer
 
 
-
 def cleanup_sockets(socketdir):
     sockets = os.listdir(socketdir)
 
@@ -584,26 +565,24 @@ def cleanup_sockets(socketdir):
     os.rmdir(socketdir)
 
 
-
 def send_configuration(address, port):
-    ''' Send a CONFIG request providing locally known data to the daemon
+    """ Send a CONFIG request providing locally known data to the daemon
         running on the specified address and port.
-    '''
+    """
 
-    names = mKTL.Config.Cache.list()
+    names = mktl.config.cache.list()
 
     request = dict()
     request['request'] = 'CONFIG'
 
     for name in names:
         request['name'] = name
-        request['data'] = mKTL.Config.Cache.get(name)
+        request['data'] = mktl.config.cache.get(name)
 
         try:
-            mKTL.Protocol.Request.send(request, address, port)
+            mktl.protocol.request.send(request, address, port)
         except zmq.error.ZMQError:
             pass
-
 
 
 if __name__ == '__main__':

@@ -7,11 +7,10 @@
 import sys
 import time
 
-import mKTL
+import mktl.proxy.ktl
 
 
 def main():
-
     ### This is a quick+dirty approach to running up a KTL/mKTL proxy. The real
     ### proxy daemon should be driven by a ConfigParser configuration file,
     ### which defines the name of the store, the proxy import that should be
@@ -24,7 +23,7 @@ def main():
     req = sys.argv[1]
     pub = sys.argv[2]
 
-    proxy = mKTL.Proxy.KTL(req, pub, service)
+    proxy = mktl.proxy.ktl.KTL(req, pub, service)
 
     while True:
         try:
