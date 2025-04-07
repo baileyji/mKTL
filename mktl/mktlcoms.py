@@ -267,16 +267,13 @@ class MKTLComs:
                         except Exception as e:
                             logging.error(f"Exception while handling message: {e}", exc_info=True)
                     elif sender_id:
-                        error_msg = {
-                            "error": f"Malformed message: {err}"
-                        }
                         frames = [
                             sender_id,
                             b"",
                             b"error",
                             uuid.uuid4().bytes,
                             b"",
-                            json.dumps(error_msg).encode()
+                            json.dumps({"error": f"Malformed message: {err}"}).encode()
                         ]
                         self._router.send_multipart(frames)
 
