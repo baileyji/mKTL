@@ -126,7 +126,7 @@ class MKTLComs:
         registry_addr: Optional[str] = None,
     ):
         self.identity = identity or f"mktl-{uuid.uuid4().hex[:8]}"
-        self.authoritative_keys = authoritative_keys or {}
+        self.authoritative_keys = {}
         self.registry_addr = registry_addr
 
         self._ctx = zmq.Context.instance()
@@ -148,12 +148,17 @@ class MKTLComs:
         self._client_lock = threading.Lock()
         self._pending_replies = {}
 
+        self._pending_subscriptions = set()
+        self._pending_lock = threading.Lock()
+
         self._sub_callbacks: Dict[str, List[Callable]] = {}
         self._sub_listeners: Dict[str, List[MKTLSubscription]] = {}
 
         self._routing_table: Dict[str, Tuple[str, str]] = {}  # key -> (identity, address)
         self._connected_addresses: Set[str] = set()
 
+        for k, h in authoritative_keys.items():
+            self.register_key_handler(k, h)
         self._register_internal_handlers()
 
     def _register_internal_handlers(self):
@@ -225,6 +230,12 @@ class MKTLComs:
 
     def register_key_handler(self, key: str, handler: Callable):
         self.authoritative_keys[key] = handler
+
+    def on(self, key: str):
+        def wrapper(fn):
+            self.register_key_handler(key, fn)
+            return fn
+        return wrapper
 
     def start(self):
         self._running = True
@@ -354,37 +365,40 @@ class MKTLComs:
         raise TimeoutError(f"Timeout waiting for {msg_type} response to key: {key}")
 
     def _handle_message(self, m: MKTLMessage):
-        if m.is_reply():
-            with self._client_lock:
-                self._pending_replies[m.req_id] = m
-        elif m.is_request():
-            if m.key.endswith(".mktl_control"):
-                m.respond("ack")
-            else:
-                m.fail("Unknown key")
+        if m.key in self.authoritative_keys:
+            try:
+                result = self.authoritative_keys[m.key](m)
+                if result is not None:
+                    m.respond(result)
+            except Exception as e:
+                m.fail(str(e))
+        elif m.key.endswith(".mktl_control"):
+            m.ack()
+        else:
+            m.fail("Unknown key")
 
     def subscribe(self, key_prefix: str, callback: Optional[Callable] = None) -> MKTLSubscription:
-        if key_prefix not in self._sub_callbacks:
-            self._sub_callbacks[key_prefix] = []
-            self._sub_listeners[key_prefix] = []
-            if self._sub_socket is None:
-                self._sub_socket = self._ctx.socket(zmq.SUB)
-                self._sub_socket.setsockopt(zmq.SUBSCRIBE, key_prefix.encode())
-                if self._sub_address:
-                    self._sub_socket.connect(self._sub_address)
+        with self._pending_lock:
+            self._pending_subscriptions.add(key_prefix)
 
         if callback:
-            self._sub_callbacks[key_prefix].append(callback)
+            self._sub_callbacks.setdefault(key_prefix, []).append(callback)
 
         listener = MKTLSubscription()
-        self._sub_listeners[key_prefix].append(listener)
+        self._sub_listeners.setdefault(key_prefix, []).append(listener)
         return listener
 
     def _listen_loop(self):
-        if not self._sub_socket:
-            return
+        self._sub_socket = self._ctx.socket(zmq.SUB)
+        self._sub_socket.setsockopt(zmq.LINGER, 0)
+        self._sub_socket.connect(self._sub_address)  # assumes this is set via connect_pub()
 
         while self._running:
+            with self._pending_lock:
+                for prefix in self._pending_subscriptions:
+                    self._sub_socket.setsockopt(zmq.SUBSCRIBE, prefix.encode())
+                self._pending_subscriptions.clear()
+
             try:
                 msg_parts = self._sub_socket.recv_multipart()
                 if len(msg_parts) >= 2:
@@ -411,6 +425,9 @@ class MKTLComs:
     def publish(self, key: str, payload: dict, binary_blob: Optional[bytes] = None):
         if self._pub_socket is None:
             raise RuntimeError("PUB socket not initialized. Call bind_pub/connect_pub first.")
+
+        if binary_blob:
+            key = f'bulk:{key}'
 
         frames = [key.encode(), json.dumps(payload).encode()]
         if binary_blob:
