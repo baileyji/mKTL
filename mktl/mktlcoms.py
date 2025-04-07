@@ -235,6 +235,11 @@ class MKTLComs:
         if self.registry_addr:
             self._send_registry_config()
 
+        if self._sub_socket:
+            t_sub = threading.Thread(target=self._listen_loop, daemon=True)
+            t_sub.start()
+            self._threads.append(t_sub)
+
     def _serve_loop(self):
         self._router = self._ctx.socket(zmq.ROUTER)
         self._router.setsockopt(zmq.IDENTITY, self.identity.encode())
@@ -244,25 +249,44 @@ class MKTLComs:
         self._dealer.setsockopt(zmq.IDENTITY, self.identity.encode())
         for addr in self._connect_addresses:
             self._dealer.connect(addr)
-            self._connected_addresses.add(addr)
 
         poller = zmq.Poller()
         poller.register(self._router, zmq.POLLIN)
+        poller.register(self._dealer, zmq.POLLIN)
 
         while self._running:
-            events = dict(poller.poll(timeout=10)) #TODO this needs to be shortened otherwise outbound messages go only once every 10s or inbound message
+            events = dict(poller.poll(timeout=10))
 
-            if self._router in events and events[self._router] == zmq.POLLIN:
-                try:
-                    msg = self._router.recv_multipart(zmq.NOBLOCK)
-                    self._handle_message(msg)
-                except zmq.Again:
-                    pass
+            for sock in (self._router, self._dealer):
+                if sock in events and events[sock] == zmq.POLLIN:
+                    msg = sock.recv_multipart()
+                    m, sender_id, err = MKTLMessage.try_parse(self, msg)
+                    if m:
+                        try:
+                            self._handle_message(m)
+                        except Exception as e:
+                            logging.error(f"Exception while handling message: {e}", exc_info=True)
+                    elif sender_id:
+                        error_msg = {
+                            "error": f"Malformed message: {err}"
+                        }
+                        frames = [
+                            sender_id,
+                            b"",
+                            b"error",
+                            uuid.uuid4().bytes,
+                            b"",
+                            json.dumps(error_msg).encode()
+                        ]
+                        self._router.send_multipart(frames)
 
             try:
                 while True:
                     item = self._send_queue.get_nowait()
-                    self._dealer.send_multipart(item.get_frames())
+                    if item.msg_type in ("ack", "response", "error"):
+                        self._router.send_multipart(item.get_frames())
+                    else:
+                        self._dealer.send_multipart(item.get_frames())
             except queue.Empty:
                 pass
 
@@ -332,35 +356,15 @@ class MKTLComs:
 
         raise TimeoutError(f"Timeout waiting for {msg_type} response to key: {key}")
 
-    def _handle_message(self, msg_parts: List[bytes]):
-        m, sender_id, err = MKTLMessage.try_parse(self, msg_parts)
-        if m:
-            if m.is_reply():
-                with self._client_lock:
-                    self._pending_replies[m.req_id] = m
-            elif m.is_request():
-                if m.key in self.authoritative_keys:
-                    try:
-                        result = self.authoritative_keys[m.key](m)
-                        if result is not None:
-                            m.respond(result)
-                    except Exception as e:
-                        logging.exception("Request handler exception")
-                        m.fail(str(e))
-                else:
-                    m.fail(f"Unknown key: {m.key}")
-        elif sender_id:
-            frames = [
-                sender_id,
-                b"",
-                b"error",
-                uuid.uuid4().bytes,
-                b"",
-                json.dumps({"error": f"Malformed message: {err}"}).encode()
-            ]
-            self._router.send_multipart(frames)
-
-
+    def _handle_message(self, m: MKTLMessage):
+        if m.is_reply():
+            with self._client_lock:
+                self._pending_replies[m.req_id] = m
+        elif m.is_request():
+            if m.key.endswith(".mktl_control"):
+                m.respond("ack")
+            else:
+                m.fail("Unknown key")
 
     def subscribe(self, key_prefix: str, callback: Optional[Callable] = None) -> MKTLSubscription:
         if key_prefix not in self._sub_callbacks:
@@ -379,7 +383,7 @@ class MKTLComs:
         self._sub_listeners[key_prefix].append(listener)
         return listener
 
-    def listen_loop(self):
+    def _listen_loop(self):
         if not self._sub_socket:
             return
 
@@ -405,7 +409,7 @@ class MKTLComs:
                             for listener in queues:
                                 listener.put(msg)
             except Exception as e:
-                logging.error(f"Error in listen loop: {e}")
+                logging.error(f"Error in _listen_loop: {e}")
 
     def publish(self, key: str, payload: dict, binary_blob: Optional[bytes] = None):
         if self._pub_socket is None:
