@@ -1,57 +1,69 @@
-
-import zmq
+from mktlcoms import MKTLComs, MKTLMessage
 import threading
-import uuid
-import json
-from collections import defaultdict
+
 
 class RegistryServer:
-    def __init__(self, bind_addr):
-        self._ctx = zmq.Context.instance()
-        self._router = self._ctx.socket(zmq.ROUTER)
-        self._router.bind(bind_addr)
-        self._running = False
-        self._known_keys = {}  # key -> {identity, address}
-        self._identity_to_keys = defaultdict(set)
+    def __init__(self, identity="registry", bind_addr="tcp://*:5570"):
+
+        authoritative_keys = {"registry.owner": self._handle_owner,
+                              "registry.config": self._handle_config}
+
+        self.coms = MKTLComs(identity=identity, authoritative_keys=authoritative_keys)
+        self.coms.bind(bind_addr)
+        self._store = {}  # key → {identity, address}
+        self._identity_to_keys = {}  # identity → set(keys)
 
     def start(self):
-        self._running = True
-        threading.Thread(target=self._loop, daemon=True).start()
+        self.coms.start()
 
-    def stop(self):
-        self._running = False
-        self._router.close()
+    def _handle_owner(self, *, key, method, context):
+        if method == "get":
+            target_key = context.get("key")
+            if not target_key:
+                return {"error": "Missing 'key'"}
+            entry = self._store.get(target_key)
+            if entry:
+                return entry
+            return {"error": "Key not found"}
 
-    def _loop(self):
-        while self._running:
-            try:
-                msg = self._router.recv_multipart()
-                if len(msg) < 6:
-                    continue
+        elif method == "set":
+            key_name = context.get("key")
+            ident = context.get("identity")
+            addr = context.get("address")
+            if not all([key_name, ident, addr]):
+                return {"error": "Missing key, identity, or address"}
+            self._store[key_name] = {"identity": ident, "address": addr}
+            self._identity_to_keys.setdefault(ident, set()).add(key_name)
+            return {"ok": True}
 
-                sender_id, _, msg_type, req_id, key, payload = msg[:6]
-                msg_type = msg_type.decode()
-                key = key.decode()
-                data = json.loads(payload.decode())
+        return {"error": f"Unsupported method: {method}"}
 
-                if msg_type == "get" and key == "registry.owner":
-                    target = data["key"]
-                    response = self._known_keys.get(target, {})
-                    frames = [sender_id, b"", b"response", req_id, key.encode(), json.dumps(response).encode()]
-                    self._router.send_multipart(frames)
+    def _handle_config(self, *, key, method, context):
+        if method == "get":
+            ident = context.get("identity")
+            if not ident:
+                return {"error": "Missing 'identity'"}
+            keys = list(self._identity_to_keys.get(ident, []))
+            return {"keys": keys}
 
-                elif msg_type == "set" and key == "registry.config":
-                    ident = data["identity"]
-                    addr = data["address"]
-                    for k in data["keys"]:
-                        self._known_keys[k] = {"identity": ident, "address": addr}
-                        self._identity_to_keys[ident].add(k)
-                    frames = [sender_id, b"", b"ack", req_id, key.encode(), json.dumps({"registered": True}).encode()]
-                    self._router.send_multipart(frames)
+        elif method == "set":
+            ident = context.get("identity")
+            addr = context.get("address")
+            keys = context.get("keys")
+            if not all([ident, addr, keys]):
+                return {"error": "Missing identity, address, or keys"}
+            for k in keys:
+                self._store[k] = {"identity": ident, "address": addr}
+                self._identity_to_keys.setdefault(ident, set()).add(k)
+            return {"ok": True}
 
-                else:
-                    frames = [sender_id, b"", b"error", req_id, key.encode(), json.dumps({"error": "Unknown request"}).encode()]
-                    self._router.send_multipart(frames)
+        return {"error": f"Unsupported method: {method}"}
 
-            except Exception as e:
-                print("Registry error:", e)
+
+if __name__ == "__main__":
+    reg = RegistryServer()
+    reg.start()
+
+    print("RegistryServer running on tcp://*:5570")
+    while True:
+        threading.Event().wait(60)
