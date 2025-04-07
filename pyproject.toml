@@ -1,0 +1,43 @@
+[build-system]
+# Specifies the build system to use. 
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Basic information about your project.
+name = "mKTL" 
+version = "0.1.0" 
+dependencies = ["astropy", "zmq"]
+requires-python = ">=3.7"
+authors = [
+  {name = "Kyle Lancos", email = "klanclos@keck.hawaii.edu"},
+  {name = "William Deich", email = "will@ucolick.org"}
+]
+maintainers = [
+  {name = "Kyle Lancos", email = "klanclos@keck.hawaii.edu"}
+]
+description = "The successor to KTL"
+readme = "README.md" 
+license = { text = "BSD" }
+keywords = ["example", "package", "keywords"] 
+classifiers = [
+  "Programming Language :: Python"
+]
+
+[project.urls]
+# Various URLs related to your project. These links are displayed on PyPI.
+Homepage = "https://github.com/KeckObservatory/mKTL" 
+Documentation = "https://github.com/KeckObservatory/mKTL/tree/main/doc"
+Repository = "https://github.com/KeckObservatory/mKTL"
+"Bug Tracker" = "https://github.com/KeckObservatory/mKTL/issues" 
+
+[project.scripts]
+# Defines command-line scripts for your package. Replace with your script and function.
+# your-command = "your_module:your_function"
+
+[project.optional-dependencies]
+# Optional dependencies that can be installed with extra tags, like "dev".
+dev = [
+  "astropy",
+  "zmq",
+]
