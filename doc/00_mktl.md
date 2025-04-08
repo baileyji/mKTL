@@ -7,8 +7,100 @@ The modern Keck Task Library (**mKTL**) protocol is a flexible, decentralized me
 This document defines the conceptual model, message protocols, key definitions, and architectural responsibilities that together constitute the mKTL system. It replaces and unifies prior documentation in `01_nomenclature`, `02_protocol`, and `03_config`.
 
 ## 2. Conceptual Model
-...
 
+At its core, the mKTL protocol enables **key-based communication and control** between distributed processes. The architecture supports daemon-driven instrumentation control, GUI tools, monitoring services, automated agents, and legacy bridges, all through a shared messaging model.
+
+### 2.1 Keys and Stores
+
+The basic unit of mKTL is a **key**, which represents a control or telemetry channel. Keys are grouped into **stores**, each representing a logical subsystem (e.g., `guider`, `adc`, `power`). A full key name is a dot-delimited path of the form:
+
+```
+<store>.<subsystem>.<key>
+```
+
+The **store name** is always the first segment of the path. While a flat model (`store.key`) is supported, this format is compatible with **nested stores** and hierarchical namespaces. For example:
+
+```
+guider.status.exposure_id
+adc.temperature.board
+```
+
+Future versions may support dynamic routing across such keypaths. However, stores are currently top-level routing units.
+
+### 2.2 Participants and Authority
+
+There are two primary participant roles in mKTL:
+
+- **Clients** issue `get`, `set`, `config`, and `subscribe` operations.
+- **Daemons** serve authoritative values and configuration for a subset of keys, typically via `MKTLComs`.
+
+A given key is **owned by exactly one daemon** (at a time). That daemon must respond to requests and optionally emit `publish` updates. Daemons advertise their key ownership to a **Registry**, allowing others to resolve key-to-identity mappings.
+
+### 2.3 Values and Types
+
+Key values are JSON-serializable by default. Supported native types include:
+
+- `int`, `float`, `bool`, `str`
+- `enum` (named string values mapped to integers)
+- `json` (arbitrary nested structures)
+- `binary` (attached as separate message frame)
+- `timestamp`, `status`, `duration`, etc.
+
+Compound and structured values are encouraged. Enums are especially preferred over unstructured strings or numeric codes, allowing self-describing protocols:
+
+```json
+{
+  "value": "in_position",
+  "enumerators": {
+    "in_position": 1,
+    "moving": 2,
+    "error": 3
+  }
+}
+```
+
+### 2.4 Operations and Message Types
+
+All mKTL communication takes place over **multipart ZeroMQ messages** with clearly defined roles and framing. The major operations are:
+
+- `get`: request the current value of a key
+- `set`: assign a value to a key
+- `config`: request metadata/config for a store
+- `ack`: early confirmation that a request was received
+- `response`: actual reply to `get` or `set`
+- `error`: structured failure message
+- `publish`: unsolicited updates from daemons
+
+Message types and framing are defined in Section 3.
+
+Additional notes:
+
+- A response is **always preceded by an `ack`**, unless the reply is immediate.
+- **Bulk binary payloads** are sent as an additional frame after the JSON payload.
+- **Bundles** of related publishes may be sent under a common topic, e.g., `guider.exposure;bundle`.
+
+### 2.5 Roles of Registry and Discovery
+
+The **Registry** daemon maintains knowledge of active keys and their owning `MKTLComs` identities and addresses. It is queried by other `MKTLComs` instances as needed, and optionally pushes updates (via `set`) to daemons that have previously queried it.
+
+The Registry does not function as a central broker—it simply assists with initial discovery and consistency of routing.
+
+- Each daemon registers its keys on startup (or dynamically)
+- Other daemons or clients request config and identity info as needed
+- **Static configuration** (YAML or JSON) is used for legacy bridges or non-dynamic systems
+
+### 2.6 mKTLComs and Communication Patterns
+
+The `MKTLComs` object is the primary communication interface for daemons and tools. It:
+
+- Binds a `ROUTER` socket for receiving requests
+- Connects a `DEALER` socket to peers for outbound requests
+- Publishes via a `PUB` socket
+- Subscribes via a `SUB` socket (optional)
+- Interfaces with `MKTLMessage`, subscription queues, and callbacks
+- Connects to the Registry for routing resolution
+
+Clients may create lightweight `MKTLComs` instances to perform transient actions, while daemons typically persist with a well-known identity and set of keys.
 
 ## 3. Message Architecture
 
