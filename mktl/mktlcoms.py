@@ -288,7 +288,7 @@ class MKTLComs:
         self._threads = []
 
         self._bind_address = None
-        self._connect_addresses = []
+        # self._connect_addresses = []
         self._send_queue = queue.Queue()
 
         self._pub_socket = None
@@ -314,8 +314,9 @@ class MKTLComs:
 
         self._shutdown_callback = shutdown_callback
 
-        for k, h in authoritative_keys.items():
-            self.register_key_handler(k, h)
+        if authoritative_keys:
+            for k, h in authoritative_keys.items():
+                self.register_key_handler(k, h)
         self._register_internal_handlers()
 
 
@@ -383,8 +384,6 @@ class MKTLComs:
                 address = payload.get('address')
                 if identity and address:
                     self._routing_table[key] = (identity, address)
-                    if address not in self._connected_addresses:
-                        self._connect_addresses.append(address)
                     return identity, address
 
         return None
@@ -438,17 +437,16 @@ class MKTLComs:
         """
         self._bind_address = address
 
-    def connect(self, address: str):
+    def _connect_for_key(self, key: str):
         """
-        Connect the DEALER socket for sending mKTL requests.
-
-        Must be used for clients that only initiate requests.
+        Connect the DEALER socket for sending mKTL requests to the identity.
 
         Args:
-            address: The remote ROUTER address to connect to.
+            key: The key for which a connections is required.
         """
+        identity, address = self._routing_table[key]
         if address not in self._connected_addresses:
-            self._connect_addresses.append(address)
+            self._dealer.connect(address)
             self._connected_addresses.add(address)
 
     def register_key_handler(self, key: str, handler: Callable):
@@ -499,13 +497,15 @@ class MKTLComs:
         t.start()
         self._threads.append(t)
 
-        t_pub = threading.Thread(target=self._publish_loop, daemon=True)
-        t_pub.start()
-        self._threads.append(t_pub)
+        if self._pub_address:
+            t_pub = threading.Thread(target=self._publish_loop, daemon=True)
+            t_pub.start()
+            self._threads.append(t_pub)
 
-        t_sub = threading.Thread(target=self._listen_loop, daemon=True)
-        t_sub.start()
-        self._threads.append(t_sub)
+        if self._sub_address:
+            t_sub = threading.Thread(target=self._listen_loop, daemon=True)
+            t_sub.start()
+            self._threads.append(t_sub)
 
         if self.registry_addr:
             self._send_registry_config()
@@ -518,12 +518,11 @@ class MKTLComs:
         """
         self._router = self._ctx.socket(zmq.ROUTER)
         self._router.setsockopt(zmq.IDENTITY, self.identity.encode())
-        self._router.bind(self._bind_address)
+        if self._bind_address:
+            self._router.bind(self._bind_address)
 
         self._dealer = self._ctx.socket(zmq.DEALER)
         self._dealer.setsockopt(zmq.IDENTITY, self.identity.encode())
-        for addr in self._connect_addresses:
-            self._dealer.connect(addr)
 
         poller = zmq.Poller()
         poller.register(self._router, zmq.POLLIN)
@@ -558,6 +557,7 @@ class MKTLComs:
                     if item.msg_type in ('ack', 'response', 'error'):
                         self._router.send_multipart(item.get_frames())
                     else:
+                        self._connect_for_key(item.key)
                         self._dealer.send_multipart(item.get_frames())
             except queue.Empty:
                 pass

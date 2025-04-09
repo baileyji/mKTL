@@ -39,7 +39,8 @@ class RegistryServer:
         authoritative_keys = {'registry.owner': self._handle_owner,
                               'registry.config': self._handle_config}
 
-        self.coms = MKTLComs(identity=identity, authoritative_keys=authoritative_keys)
+        self.coms = MKTLComs(identity=identity, authoritative_keys=authoritative_keys,
+                             shutdown_callback=self.shutdown)
         self.coms.bind(bind_addr)
         self._store = {}  # key → {identity, address}
         self._identity_to_keys = {}  # identity → set(keys)
@@ -52,6 +53,10 @@ class RegistryServer:
         and registration services.
         """
         self.coms.start()
+
+    def shutdown(self):
+        self.coms.stop()
+        exit(0)
 
     def _handle_owner(self, *, key, method, context):
         """
