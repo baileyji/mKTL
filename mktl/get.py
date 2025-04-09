@@ -4,12 +4,12 @@
 
 import zmq
 
-from . import client
-from . import config
-from . import protocol
+from .config import cache, file
+from .protocol import discover, request
+from .client import store as client_store
 
 
-cache = dict()
+_cache = dict()
 
 def get(store, key=None):
     """ Return a cached :class:`Store` or :class:`Item` instance. If both a
@@ -37,7 +37,7 @@ def get(store, key=None):
     # handling of configuration data.
 
     try:
-        store = cache[store]
+        store = _cache[store]
     except KeyError:
         pass
     else:
@@ -51,7 +51,7 @@ def get(store, key=None):
     # Assume any configuration loaded into memory is recent and adequate.
 
     try:
-        config = config.get(store)
+        config = cache.get(store)
     except KeyError:
         config = None
 
@@ -60,7 +60,7 @@ def get(store, key=None):
 
     if config is None:
         try:
-            config = config.load(store)
+            config = file.load(store)
         except KeyError:
             config = None
         else:
@@ -71,18 +71,18 @@ def get(store, key=None):
     # broadcast and hope someone's out there that can help.
 
     if config is None:
-        guides = protocol.Discover.search()
+        guides = discover.search()
         if len(guides) == 0:
             raise RuntimeError("no configuration available for '%s' (local or remote)" % (store))
 
         hostname,port = guides[0]
-        client = protocol.Request.client(hostname, port)
+        client = request.client(hostname, port)
 
-        request = dict()
-        request['request'] = 'CONFIG'
-        request['name'] = store
+        req = dict()
+        req['request'] = 'CONFIG'
+        req['name'] = store
 
-        pending = client.send(request)
+        pending = client.send(req)
         response = pending.wait()
 
         try:
@@ -98,8 +98,8 @@ def get(store, key=None):
     # instance initializes it will request the current configuration from what's
     # in config.Cache.
 
-    store = client.Store(store)
-    cache[store.name] = store
+    store = client_store.Store(store)
+    _cache[store.name] = store
 
     if key is None:
         return store
@@ -131,14 +131,14 @@ def refresh(store, config):
             hostname = stratum['hostname']
             req = stratum['req']
 
-            client = protocol.Request.client(hostname, req)
+            client = request.client(hostname, req)
 
-            request = dict()
-            request['request'] = 'HASH'
-            request['name'] = store
+            req = dict()
+            req['request'] = 'HASH'
+            req['name'] = store
 
             try:
-                pending = client.send(request)
+                pending = client.send(req)
             except zmq.ZMQError:
                 # No response from this daemon; move on to the next entry in
                 # the provenance. If no daemons respond the client will have
@@ -161,8 +161,8 @@ def refresh(store, config):
 
             if local_hash != remote_hash:
                 # Mismatch; need to request an update before proceeding.
-                request['request'] = 'CONFIG'
-                pending = client.send(request)
+                req['request'] = 'CONFIG'
+                pending = client.send(req)
                 ### Again, exception handling may be required, though the
                 ### previous request went through, so there shouldn't be a
                 ### a fresh exception here unless the remote daemon just

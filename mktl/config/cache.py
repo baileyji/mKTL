@@ -54,7 +54,7 @@ def add(store, data, save=True):
 
     hash.rehash(store)
     items.clear(store)
-    if save == True:
+    if save:
         file.save(store, blocks)
 
 

@@ -1,4 +1,4 @@
-#! /usr/bin/env kpython3
+#! /usr/bin/env python3
 
 # This is a subprocess invoked by an authoritative daemon to save item values
 # in a persistent disk cache, so that item values can remain consistent across
@@ -6,7 +6,6 @@
 import sys
 import time
 
-import mktl.get
 import mktl.daemon.persist
 
 

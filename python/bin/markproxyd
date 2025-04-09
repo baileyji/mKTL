@@ -1,4 +1,4 @@
-#! /usr/bin/env kpython3
+#! /usr/bin/env python3
 
 # This is a mKTL proxy front-end. It should be configuration driven, and be
 # willing to invoke as many subprocesses as necessary in order to provide

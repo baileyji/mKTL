@@ -116,7 +116,7 @@ class DirectServer(Server):
     port = direct_port
 
     def __init__(self, request):
-        super().__init__(self, request)
+        super().__init__(request)
 
 
 # end of class DirectServer

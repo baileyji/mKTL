@@ -1,12 +1,15 @@
 import subprocess
 import sys
 import zmq
+import importlib.resources
+import os
 
 from ..config import hash as config_hash  # Don't shadow hash()
 from ..config import items
 from ..config import cache
 from ..config import file
 from ..client import store
+from .. import config
 from ..protocol import discover
 from ..protocol import request
 from ..protocol import publish
@@ -103,10 +106,11 @@ class Store(store.Store):
         ### This is not a valid way to find the markpersistd executable.
 
         arguments = list()
-        arguments.append('/home/lanclos/git/mKTL/python/bin/markpersistd')
+        binfile = os.path.join(str(importlib.resources.files('mktl')), '../python/bin/markpersistd')
+        arguments.append(binfile)
         arguments.append(self.name)
         arguments.append(self.daemon_uuid)
-
+        print(arguments)
         pipe = subprocess.PIPE
         self.persistence = subprocess.Popen(arguments)
 
@@ -153,14 +157,14 @@ class Store(store.Store):
             except KeyError:
                 self._items[key] = None
 
-    def _update_daemon_config(self, config):
+    def _update_daemon_config(self, cfg):
 
-        uuid = list(config.keys())[0]
-        self.daemon_config = config
+        uuid = list(cfg.keys())[0]
+        self.daemon_config = cfg
         self.daemon_uuid = uuid
-        config.add(self.name, config)
+        cache.add(self.name, cfg)
 
-        config = config.Items.get(self.name)
+        config = items.get(self.name)
         self._daemon_items.update(config)
         self._update_config(config)
 
@@ -193,7 +197,7 @@ class Store(store.Store):
 class RequestServer(request.Server):
 
     def __init__(self, store, *args, **kwargs):
-        super().__init__(self, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.store = store
 
     def req_config(self, request):

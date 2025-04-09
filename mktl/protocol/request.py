@@ -108,7 +108,7 @@ class Client:
 
                     # All other responses are expected to be JSON.
 
-                    response_dict = Json.loads(response)
+                    response_dict = json.loads(response)
                     response_id = response_dict['id']
 
                     try:
