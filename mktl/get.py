@@ -64,7 +64,7 @@ def get(store, key=None):
         except KeyError:
             config = None
         else:
-            config.add(store, config, save=False)
+            cache.add(store, config, save=False)
             config = refresh(store, config)
 
     # If we still don't have a configuration it's time to try a network
@@ -91,7 +91,7 @@ def get(store, key=None):
             raise RuntimeError("no configuration available for '%s' (local or remote)" % (store))
 
         # If we made it this far the network came through with an answer.
-        config.add(store, config)
+        cache.add(store, config)
 
 
     # The local reference to the configuration isn't necessary, when the Store

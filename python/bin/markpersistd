@@ -7,6 +7,7 @@ import sys
 import time
 
 import mktl.daemon.persist
+import mktl.get
 
 
 def main():
@@ -35,14 +36,14 @@ def main():
         except KeyError:
             continue
 
-        if persist == True:
+        if persist:
             item.register(mktl.daemon.persist.save)
             watched += 1
 
-    if matches == 0:
-        raise RuntimeError("no items found in '%s' for UUID %s" % (store, uuid))
+    if not matches:
+        raise RuntimeError(f"no items found in {store} for UUID {uuid}")
 
-    if watched == 0:
+    if not watched:
         print('No persistent items found, markpersistd subprocess exiting.')
         sys.exit(0)
 
