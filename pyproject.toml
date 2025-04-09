@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 # Basic information about your project.
 name = "mKTL" 
 version = "0.1.0" 
-dependencies = ["astropy", "zmq"]
+dependencies = ["astropy", "pyzmq"]
 requires-python = ">=3.7"
 authors = [
   {name = "Kyle Lancos", email = "klanclos@keck.hawaii.edu"},
@@ -39,5 +39,5 @@ Repository = "https://github.com/KeckObservatory/mKTL"
 # Optional dependencies that can be installed with extra tags, like "dev".
 dev = [
   "astropy",
-  "zmq",
+  "pyzmq",
 ]

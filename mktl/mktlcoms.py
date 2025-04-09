@@ -266,7 +266,7 @@ class MKTLComs:
     """
 
     def __init__(self, identity: Optional[str] = None, authoritative_keys: Optional[Dict[str, Callable]] = None,
-                 registry_addr: Optional[str] = None):
+                 registry_addr: Optional[str] = None, shutdown_callback: Optional[Callable] = None):
         """
         Initialize a new mKTL communications object.
 
@@ -312,9 +312,12 @@ class MKTLComs:
         self._routing_table: Dict[str, Tuple[str, str]] = {}  # key -> (identity, address)
         self._connected_addresses: Set[str] = set()
 
+        self._shutdown_callback = shutdown_callback
+
         for k, h in authoritative_keys.items():
             self.register_key_handler(k, h)
         self._register_internal_handlers()
+
 
     def _register_internal_handlers(self):
         """
@@ -333,7 +336,9 @@ class MKTLComs:
         Separates routing logic and handler dispatch.
         """
         logging.info(f'Control message received: {msg.json_data}')
-        return msg.respond('ACK')
+        msg.respond('ACK')
+        if msg.json_data['value'] == 'shutdown' and self._shutdown_callback is not None:
+            self._shutdown_callback()
 
     def _query_registry_owner(self, key: str) -> Optional[Tuple[str, str]]:
         """
