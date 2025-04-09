@@ -120,10 +120,15 @@ class RegistryServer:
         return {'error': f'Unsupported method: {method}'}
 
 
+
 if __name__ == '__main__':
+    from logging import basicConfig, DEBUG, getLogger
+    basicConfig(level=DEBUG)
+    getLogger('mktl').setLevel(DEBUG)
+    getLogger('__main__').setLevel(DEBUG)
     reg = RegistryServer()
     reg.start()
 
-    print("RegistryServer running on tcp://*:5570")
+    getLogger(__name__).info("RegistryServer running on tcp://*:5570")
     while True:
         threading.Event().wait(60)

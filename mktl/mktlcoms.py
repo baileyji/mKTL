@@ -15,6 +15,8 @@ Typical usage:
 
     val, blob = coms.get("another.service.key")
 """
+from logging import getLogger
+
 import zmq
 import threading
 import uuid
@@ -56,6 +58,9 @@ class MKTLMessage:
         self.binary_blob = binary_blob
         self.responded = False
         self.destination = destination or b''
+
+    def __repr__(self):
+        return f'<MKTLMessage {self.coms}, {self.sender_id}, {self.msg_type}, {self.req_id}, {self.key}, {self.json_data}, {self.binary_blob}>'
 
     @classmethod
     def from_frames(cls, coms, msg: List[bytes]):
@@ -516,6 +521,7 @@ class MKTLComs:
 
         Handles control-plane traffic: requests, responses, and registry lookups.
         """
+        getLogger(__name__).debug(f'Starting server loop for {self.identity} at {self._bind_address}')
         self._router = self._ctx.socket(zmq.ROUTER)
         self._router.setsockopt(zmq.IDENTITY, self.identity.encode())
         if self._bind_address:
@@ -535,6 +541,7 @@ class MKTLComs:
                 if sock in events and events[sock] == zmq.POLLIN:
                     msg = sock.recv_multipart()
                     m, sender_id, err = MKTLMessage.try_parse(self, msg)
+                    getLogger(__name__).debug(f'Received message: {m}, {sender_id}, {err}')
                     if m:
                         try:
                             self._handle_message(m)
@@ -555,9 +562,11 @@ class MKTLComs:
                 while True:
                     item = self._send_queue.get_nowait()
                     if item.msg_type in ('ack', 'response', 'error'):
+                        getLogger(__name__).debug(f'Sending with router: {item}')
                         self._router.send_multipart(item.get_frames())
                     else:
                         self._connect_for_key(item.key)
+                        getLogger(__name__).debug(f'Sending with dealer: {item}')
                         self._dealer.send_multipart(item.get_frames())
             except queue.Empty:
                 pass
