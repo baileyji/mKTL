@@ -1,0 +1,38 @@
+#! /usr/bin/env python3
+
+import itertools
+import numpy
+import time
+
+import mktl as mKTL
+
+def main():
+    item = mKTL.get('potpie.BULK')
+
+    start = time.time()
+    iterations = 0
+    target = 10000
+
+    get_times = list()
+
+    while iterations < target:
+        begin = time.time()
+        current = item.get()
+        end = time.time()
+        get_times.append(end - begin)
+
+        iterations += 1
+
+    end = time.time()
+    elapsed = end - start
+    print("Completed %d iterations in %.3f seconds (%.3f/sec)" % (iterations, elapsed, iterations / elapsed))
+
+    get_times = numpy.array(get_times)
+
+    print("Gets: %.6f / %.6f / %.6f (%.6f) :: min/med/max (stddev)" % (get_times.min(), numpy.median(get_times), get_times.max(), numpy.std(get_times)))
+
+
+if __name__ == '__main__':
+    ##import cProfile
+    ##cProfile.run('main()', 'testreqloop.profile')
+    main()

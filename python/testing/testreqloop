@@ -1,0 +1,72 @@
+#! /usr/bin/env python3
+
+import itertools
+import numpy
+import time
+
+import mKTL
+
+def main():
+    store = mKTL.get('potpie')
+    item = mKTL.get('potpie.INTEGER')
+
+    start = time.time()
+    iterations = 0
+    target = 10000
+
+    item.set(0)
+
+    get_times = list()
+    set_times = list()
+
+    while iterations < target:
+        begin = time.time()
+        current = item.get()
+        end = time.time()
+        get_times.append(end - begin)
+
+        new_value = current['bin'] + 1
+
+        begin = time.time()
+        item.set(new_value)
+        end = time.time()
+        set_times.append(end - begin)
+        iterations += 1
+
+    end = time.time()
+    elapsed = end - start
+    print("Completed %d iterations in %.3f seconds (%.3f/sec)" % (iterations, elapsed, iterations / elapsed))
+
+    get_times = numpy.array(get_times)
+    set_times = numpy.array(set_times)
+
+    print("Gets: %.6f / %.6f / %.6f (%.6f) :: min/med/max (stddev)" % (get_times.min(), numpy.median(get_times), get_times.max(), numpy.std(get_times)))
+    print("Sets: %.6f / %.6f / %.6f (%.6f) :: min/med/max (stddev)" % (set_times.min(), numpy.median(set_times), set_times.max(), numpy.std(set_times)))
+
+    item = mKTL.get('potpie.INTEGER')
+
+    start = time.time()
+    iterations = 0
+
+    value0 = 4096 * 'fiatslug'
+    value1 = reversed(value0)
+    value1 = list(value1)
+    value1 = ''.join(value1)
+
+    while iterations < target:
+        old_value = item.get()
+        if iterations % 2 == 0:
+            new_value = value0
+        else:
+            new_value = value1
+        item.set(new_value)
+        iterations += 1
+
+    end = time.time()
+    elapsed = end - start
+    print("Completed %d iterations in %.3f seconds (%.3f/sec)" % (iterations, elapsed, iterations / elapsed))
+
+if __name__ == '__main__':
+    ##import cProfile
+    ##cProfile.run('main()', 'testreqloop.profile')
+    main()

@@ -1,0 +1,258 @@
+#! /usr/bin/env python3
+
+# This is a mKTL test daemon. Receiving trivial requests, providing trivial
+# answers.
+
+from astropy.io import fits
+import socket
+import threading
+import time
+import uuid
+import sys
+import os
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import mktl as mKTL
+
+
+def main():
+
+    main.pub = mKTL.protocol.publish.Server()
+    main.req = RequestServer()
+
+    config = generate_config()
+    mKTL.config.add('potpie', config)
+
+    last = time.time()
+    delay = 1
+
+    while True:
+        next = last + delay
+        waittime = next - time.time()
+        if waittime > 0:
+            try:
+                main.shutdown.wait(waittime)
+            except (KeyboardInterrupt, SystemExit):
+                break
+
+        last = next
+        main.req.items['potpie.BULK'].republish()
+
+
+main.shutdown = threading.Event()
+main.pub = None
+main.req = None
+
+
+
+class RequestServer(mKTL.protocol.publish.Server):
+    ''' Subclass the generic :class:mKTL.Protocol.Request.Server`, adding
+        additional logic to locally handle requests.
+    '''
+
+    def __init__(self, *args, **kwargs):
+
+        mKTL.protocol.publish.Server.__init__(self, *args, **kwargs)
+
+        self.items = dict()
+        names = ('INTEGER', 'STRING')
+
+        for name in names:
+            self.items['potpie.' + name] = Item('potpie.' + name)
+
+        self.items['potpie.BULK'] = BulkItem('potpie.BULK')
+
+
+    def req_config(self, request):
+        ''' Return a configuration block for the requested store name. The
+            configuration blocks are stored locally every time a subprocess
+            starts running.
+        '''
+
+        store = request['name']
+        config = mKTL.Config.get(store)
+        return config
+
+
+    def req_handler(self, socket, lock, ident, request):
+        ''' Inspect the incoming request type and decide how a response
+            will be generated.
+        '''
+
+        self.req_ack(socket, lock, ident, request)
+
+        try:
+            type = request['request']
+        except KeyError:
+            raise KeyError("invalid request JSON, 'request' not set")
+
+        try:
+            name = request['name']
+        except KeyError:
+            if type != 'HASH':
+                raise KeyError("invalid request JSON, 'name' not set")
+
+        if type == 'HASH':
+            payload = self.req_hash(request)
+        elif type == 'SET':
+            payload = self.req_set(request)
+        elif type == 'GET':
+            payload = self.req_get(request)
+        elif type == 'CONFIG':
+            payload = self.req_config(request)
+        else:
+            raise ValueError('unhandled request type: ' + type)
+
+        return payload
+
+
+    def req_get(self, request):
+        name = request['name']
+        item = self.items[name]
+
+        if item.bulk is not None:
+            payload,bulk = item.bulk_payload()
+            payload = dict(payload)
+            payload['bulk'] = bulk
+        else:
+            payload = dict()
+            payload['asc'] = item.current
+            payload['bin'] = item.current
+
+        return payload
+
+
+    def req_set(self, request):
+
+        ### Needs a notion of locally storing bulk data.
+
+        name = request['name']
+        data = request['data']
+        item = self.items[name]
+        item.current = data
+
+        # This could re-use the original request dictionary if we felt like
+        # trusting it.
+
+        message = dict()
+        message['message'] = 'PUB'
+        message['name'] = name
+        message['time'] = time.time()
+        message['data'] = data
+        main.pub.publish(message)
+
+        payload = dict()
+        payload['data'] = True
+        return payload
+
+
+    def req_hash(self, request):
+        ''' Return the hash of a configuration block for a requested store name,
+            or all hashes for all locally known stores.
+        '''
+
+        try:
+            store = request['name']
+        except KeyError:
+            store = None
+
+        try:
+            hashes = mKTL.config.hash.get(store)
+        except KeyError:
+            raise KeyError('no local configuration for ' + repr(store))
+
+        return hashes
+
+
+# end of class RequestServer
+
+
+
+class Item:
+
+    def __init__(self, name):
+        self.bulk = None
+        self.current = 0
+        self.name = name
+
+
+# end of class Item
+
+
+class BulkItem(Item):
+
+    def __init__(self, *args, **kwargs):
+        Item.__init__(self, *args, **kwargs)
+
+        fitsfile = 'python/testing/test.fits'
+        with fits.open(fitsfile) as self.hdus:
+            self.bulk = self.hdus[1].data.astype('uint16')
+            self.bulk_payload()
+
+
+    def bulk_payload(self):
+
+        payload = dict()
+        payload['shape'] = self.bulk.shape
+        payload['dtype'] = str(self.bulk.dtype)
+
+        self.cached_data_payload = payload
+        self.cached_bulk_payload = self.bulk.tobytes()
+        return (self.cached_data_payload, self.cached_bulk_payload)
+
+
+    def republish(self):
+
+        message = dict()
+        message['message'] = 'PUB'
+        message['name'] = self.name
+        message['time'] = time.time()
+        message['bulk'] = self.cached_bulk_payload
+        message['data'] = self.cached_data_payload
+        main.pub.publish(message)
+
+
+# end of class BulkItem
+
+
+def generate_config():
+    store = 'potpie'
+    local_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, store))
+
+    block = dict()
+    block['name'] = store
+    block['uuid'] = local_uuid
+    block['time'] = time.time()
+
+    hostname = socket.getfqdn()
+    req = main.req.port
+    pub = main.pub.port
+    mKTL.config.provenance.add(block, hostname, req, pub)
+
+    keys = dict()
+
+    keys['INTEGER'] = dict()
+    keys['INTEGER']['description'] = 'A dummy keyword, ostensibly numeric.'
+    keys['INTEGER']['units'] = 'meaningless units'
+    keys['INTEGER']['type'] = 'numeric'
+
+    keys['STRING'] = dict()
+    keys['STRING']['description'] = 'A dummy keyword, ostensibly a string.'
+    keys['STRING']['type'] = 'string'
+
+    keys['BULK'] = dict()
+    keys['BULK']['description'] = 'A bulk data keyword.'
+    keys['BULK']['type'] = 'bulk'
+
+    block['hash'] = mKTL.config.hash.hash(keys)
+    block['keys'] = keys
+
+    return block
+
+
+
+if __name__ == '__main__':
+    main()
+
+# vim: set expandtab tabstop=8 softtabstop=4 shiftwidth=4 autoindent:

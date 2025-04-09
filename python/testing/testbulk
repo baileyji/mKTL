@@ -1,0 +1,39 @@
+#! /usr/bin/env python3
+
+import time
+
+import mktl as mKTL
+import numpy
+
+# This first bit is a crutch to get a direct client connection; if we knew
+# the port number to connect to we could bake it in here and call
+# mKTL.Protocol.Request.client() directly.
+
+potpie = mKTL.get('potpie.BULK')
+req = potpie.req
+
+# End of crutch.
+
+
+request = dict()
+request['request'] = 'GET'
+request['name'] = 'potpie.BULK'
+
+pending = req.send(request)
+response = pending.wait()
+
+bulk = response['bulk']
+response['bulk'] = True
+print("%s ==> %s" % (repr(request), repr(response)[:200]))
+
+desc = response['data']
+print(repr(desc))
+shape = desc['shape']
+shape = tuple(shape)
+dtype = desc['dtype']
+
+dtype = getattr(numpy, dtype)
+serialized = numpy.frombuffer(bulk, dtype=dtype)
+image = numpy.reshape(serialized, newshape=shape)
+
+print(repr(image))

@@ -1,0 +1,16 @@
+#! /usr/bin/env python3
+
+import mKTL
+import time
+
+def test_callback(item, value, timestamp):
+    print("%.3f: %s %s" % (timestamp, item.name, repr(value)))
+
+item = mKTL.get('potpie.INTEGER')
+item.register(test_callback)
+
+while True:
+    try:
+        time.sleep(30)
+    except (KeyboardInterrupt,SystemExit):
+        break

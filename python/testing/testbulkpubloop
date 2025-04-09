@@ -1,0 +1,28 @@
+#! /usr/bin/env python3
+
+import itertools
+import numpy
+import time
+
+import mktl as mKTL
+
+timestamps = list()
+def test_callback(key, value, timestamp):
+    timestamps.append(timestamp)
+
+def main():
+    item = mKTL.get('potpie.BULK')
+    item.register(test_callback)
+
+    delay = 10
+    time.sleep(delay)
+
+    count = len(timestamps)
+    rate = count / delay
+    print("Pubs: %d in %.1f seconds (%.1f / sec)" % (count, delay, rate))
+
+
+if __name__ == '__main__':
+    ##import cProfile
+    ##cProfile.run('main()', 'testreqloop.profile')
+    main()

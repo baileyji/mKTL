@@ -1,0 +1,43 @@
+#! /usr/bin/env python3
+
+import time
+
+import sys
+import os
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import mktl as mKTL
+
+# This first bit is a crutch to get a direct client connection; if we knew
+# the port number to connect to we could bake it in here and call
+# mKTL.Protocol.Request.client() directly.
+
+potpie = mKTL.get('potpie.INTEGER')
+req = potpie.req
+
+# End of crutch.
+
+request = dict()
+request['request'] = 'GET'
+request['name'] = 'potpie.INTEGER'
+
+pending = req.send(request)
+response = pending.wait()
+
+print("%s ==> %s" % (repr(request), repr(response)))
+
+old_value = response['data']
+print(repr(old_value))
+new_value = old_value['bin'] + 1
+
+request = dict()
+request['request'] = 'SET'
+request['name'] = 'potpie.INTEGER'
+request['data'] = new_value
+
+pending = req.send(request, response=False)
+#response = pending.wait()
+response = None
+
+print("%s ==> %s" % (repr(request), repr(response)))

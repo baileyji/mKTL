@@ -1,0 +1,6 @@
+#! /usr/bin/env python3
+
+import pstats
+stats = pstats.Stats('testreqloop.profile')
+sorted = stats.sort_stats(pstats.SortKey.TIME, pstats.SortKey.CUMULATIVE)
+sorted.print_stats()

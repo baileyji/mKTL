@@ -1,0 +1,32 @@
+#! /usr/bin/env python3
+
+import json
+import time
+
+import mktl as mKTL
+
+# This first bit is a crutch to get a direct client connection; if we knew
+# the port number to connect to we could bake it in here and call
+# mKTL.Protocol.Request.client() directly.
+
+potpie = mKTL.get('potpie')
+keys = potpie.keys()
+keys = list(keys)
+
+something = keys.pop()
+something = potpie[something]
+req = something.req
+
+# End of crutch.
+
+request = dict()
+request['request'] = 'CONFIG'
+request['id'] = 5434
+request['name'] = 'potpie'
+
+pending = req.send(request)
+response = pending.wait()
+print("%s ==> %s" % (repr(request), repr(response)))
+
+response = json.dumps(response, indent=2)
+print(response)
