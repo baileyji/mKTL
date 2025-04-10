@@ -16,7 +16,7 @@ Typical usage:
     val, blob = coms.get("another.service.key")
 """
 from logging import getLogger
-
+import itertools
 import zmq
 import threading
 import uuid
@@ -80,9 +80,8 @@ class MKTLMessage:
         if not msg or len(msg) < 6:
             raise ValueError('Malformed message: insufficient frames')
 
-        sender_id = msg[0]
-        _, msg_type, req_id, key, json_payload = msg[1:6]
-        extra_frames = msg[6:] if len(msg) > 6 else []
+        sender_id, dest_id, _, msg_type, req_id, key, json_payload = msg[:7]
+        extra_frames = msg[7:] if len(msg) > 7 else []
         binary_blob = extra_frames[0] if extra_frames else None
 
         msg_type = msg_type.decode()
@@ -346,6 +345,39 @@ class MKTLComs:
         if msg.json_data['value'] == 'shutdown' and self._shutdown_callback is not None:
             self._shutdown_callback()
 
+    def _send_registry_config(self):
+        """
+        Announce this node's authoritative keys to the registry service.
+
+        Encodes the identity, address, and known keys into a StoreConfig payload
+        and sends it as a `set` to `registry.config`.
+        """
+        ctx = zmq.Context.instance()
+        s = ctx.socket(zmq.DEALER)
+        s.setsockopt(zmq.IDENTITY, self.identity.encode())
+        s.connect(self.registry_addr)
+
+        req_id = uuid.uuid4().bytes
+        keys = list(self.authoritative_keys.keys())
+        payload = {'identity': self.identity,
+                   'address': self._bind_address,
+                   'keys': keys,
+                   }
+
+        # frames1= MKTLMessage(
+        #     coms=self,
+        #     sender_id=self.identity.encode(),
+        #     msg_type='set',
+        #     req_id=req_id,
+        #     key='registry.config',
+        #     json_data=payload,
+        #     binary_blob=None,
+        #     destination=b'registry').get_frames()
+        frames = [b'registry', b'', b'set', req_id, b'registry.config', json.dumps(payload).encode()
+                  ]
+        s.send_multipart(frames)
+        s.close()
+
     def _query_registry_owner(self, key: str) -> Optional[Tuple[str, str]]:
         """
         Query the registry for the owner of a specific key.
@@ -563,41 +595,29 @@ class MKTLComs:
                     item = self._send_queue.get_nowait()
                     if item.msg_type in ('ack', 'response', 'error'):
                         getLogger(__name__).debug(f'Sending with router: {item}')
-                        self._router.send_multipart(item.get_frames())
+                        self._router.send_multipart([self.identity.encode()]+item.get_frames())
                     else:
                         self._connect_for_key(item.key)
                         getLogger(__name__).debug(f'Sending with dealer: {item}')
-                        self._dealer.send_multipart(item.get_frames())
+                        self._dealer.send_multipart([b'']+item.get_frames())
             except queue.Empty:
                 pass
 
         self._router.close()
         self._dealer.close()
 
-    def _send_registry_config(self):
-        """
-        Announce this node's authoritative keys to the registry service.
-
-        Encodes the identity, address, and known keys into a StoreConfig payload
-        and sends it as a `set` to `registry.config`.
-        """
-        ctx = zmq.Context.instance()
-        s = ctx.socket(zmq.DEALER)
-        s.setsockopt(zmq.IDENTITY, self.identity.encode())
-        s.connect(self.registry_addr)
-
-        req_id = uuid.uuid4().bytes
-        keys = list(self.authoritative_keys.keys())
-        payload = {'identity': self.identity,
-                   'address': self._bind_address,
-                   'keys': keys,
-                   }
-
-        frames = [b'registry', b'', b'set', req_id,
-                  b'registry.config', json.dumps(payload).encode()
-                  ]
-        s.send_multipart(frames)
-        s.close()
+    # def _req_id_gen(self):
+    #     max_id = 1000000
+    #     min_id = 0
+    #     gen = itertools.count(min_id)
+    #     lock = threading.Lock()
+    #     while True:
+    #         with lock:
+    #             req_id = next(gen)
+    #             if req_id>max_id:
+    #                 gen = itertools.count(min_id)
+    #                 req_id = next(gen)
+    #             yield req_id
 
     def stop(self):
         """

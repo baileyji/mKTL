@@ -58,7 +58,7 @@ class RegistryServer:
         self.coms.stop()
         exit(0)
 
-    def _handle_owner(self, *, key, method, context):
+    def _handle_owner(self, m:MKTLMessage):
         """
         Respond to `get` or `set` requests on `registry.owner`.
 
@@ -68,6 +68,8 @@ class RegistryServer:
         Expected payload fields:
             key, identity, address
         """
+        method = m.msg_type
+        context = m.json_data
         if method == 'get':
             target_key = context.get('key')
             if not target_key:
@@ -89,7 +91,7 @@ class RegistryServer:
 
         return {'error': f'Unsupported method: {method}'}
 
-    def _handle_config(self, *, key, method, context):
+    def _handle_config(self, m:MKTLMessage):
         """
         Respond to `get` or `set` requests on `registry.config`.
 
@@ -99,6 +101,8 @@ class RegistryServer:
         Expected payload fields:
             identity, address, keys[]
         """
+        method = m.msg_type
+        context = m.json_data
         if method == 'get':
             ident = context.get('identity')
             if not ident:
