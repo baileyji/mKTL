@@ -75,9 +75,7 @@ class RegistryServer:
             if not target_key:
                 return {'error': "Missing 'key'"}
             entry = self._store.get(target_key)
-            if entry:
-                return entry
-            return {'error': 'Key not found'}
+            return entry or {'error': 'Key not found'}
 
         elif method == 'set':
             key_name = context.get('key')

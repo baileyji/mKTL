@@ -145,7 +145,7 @@ class MKTLMessage:
             binary_blob: Optional raw bytes for frame 6.
         """
         if not self.responded:
-            self._enqueue('response', {'value': value}, binary_blob, destination=self.sender_id)
+            self._enqueue('response', value, binary_blob, destination=self.sender_id)
             self.responded = True
 
     def fail(self, error_msg):
@@ -323,6 +323,7 @@ class MKTLComs:
                 self.register_key_handler(k, h)
         self._register_internal_handlers()
 
+        getLogger(__name__).debug(f'Created {self}')
 
     def _register_internal_handlers(self):
         """
@@ -340,7 +341,7 @@ class MKTLComs:
         Handles `get`, `set`, `ack`, `response`, and `error` messages.
         Separates routing logic and handler dispatch.
         """
-        logging.info(f'Control message received: {msg.json_data}')
+        getLogger(__name__).info(f'Control message received: {msg.json_data}')
         msg.respond('ACK')
         if msg.json_data['value'] == 'shutdown' and self._shutdown_callback is not None:
             self._shutdown_callback()
@@ -352,6 +353,12 @@ class MKTLComs:
         Encodes the identity, address, and known keys into a StoreConfig payload
         and sends it as a `set` to `registry.config`.
         """
+        keys = list(self.authoritative_keys.keys())
+        keys.remove(f'{self.identity}.mktl_control')
+        if not keys:
+            # We don't accept commands
+            return
+
         ctx = zmq.Context.instance()
         s = ctx.socket(zmq.DEALER)
         s.setsockopt(zmq.IDENTITY, self.identity.encode())
@@ -392,7 +399,7 @@ class MKTLComs:
             Tuple of (identity, address), or raises on failure.
         """
         if not self.registry_addr:
-            logging.warning('Registry address not configured.')
+            getLogger(__name__).warning('Registry address not configured.')
             return None
 
         ctx = zmq.Context.instance()
@@ -400,6 +407,8 @@ class MKTLComs:
         temp_id = f'query-{uuid.uuid4().hex[:8]}'
         s.setsockopt(zmq.IDENTITY, temp_id.encode())
         s.connect(self.registry_addr)
+        poller = zmq.Poller()
+        poller.register(s, zmq.POLLIN)
 
         req_id = uuid.uuid4().bytes
         json_data = json.dumps({'key': key}).encode()
@@ -410,18 +419,17 @@ class MKTLComs:
         ]
         s.send_multipart(frames)
 
-        poller = zmq.Poller()
-        poller.register(s, zmq.POLLIN)
         socks = dict(poller.poll(timeout=2000))
         if s in socks:
             reply = s.recv_multipart()
-            if len(reply) >= 6:
-                payload = json.loads(reply[5].decode())
-                identity = payload.get('identity')
-                address = payload.get('address')
-                if identity and address:
-                    self._routing_table[key] = (identity, address)
-                    return identity, address
+            getLogger(__name__).debug('Received multipart message on SUB socket')
+            _, message_type, req_id, key, json_data = reply[:5]  #TODO why isn't there the sender??
+            payload = json.loads(json_data.decode())
+            identity = payload.get('identity')
+            address = payload.get('address')
+            if identity and address:
+                self._routing_table[key.decode()] = (identity, address)
+                return identity, address
 
         return None
 
@@ -441,11 +449,12 @@ class MKTLComs:
         if destination is not None:
             return destination
 
-        identity, _ = self._routing_table.get(key, (None, None))
+        identity, address = self._routing_table.get(key, (None, None))
         if identity is None:
             resolved = self._query_registry_owner(key)
             if not resolved:
                 raise RuntimeError(f'Could not resolve destination for key: {key}')
+            self._routing_table[key] = resolved
             identity, _ = resolved
         return identity
 
@@ -531,21 +540,25 @@ class MKTLComs:
         self._running = True
 
         t = threading.Thread(target=self._serve_loop, daemon=True)
+        getLogger(__name__).info('Starting serve loop thread')
         t.start()
         self._threads.append(t)
 
         if self._pub_address:
             t_pub = threading.Thread(target=self._publish_loop, daemon=True)
+            getLogger(__name__).info('Starting publish loop thread')
             t_pub.start()
             self._threads.append(t_pub)
 
         if self._sub_address:
             t_sub = threading.Thread(target=self._listen_loop, daemon=True)
+            getLogger(__name__).info('Starting listen loop thread')
             t_sub.start()
             self._threads.append(t_sub)
 
         if self.registry_addr:
             self._send_registry_config()
+            getLogger(__name__).info('Sending StoreConfig to registry')
 
     def _serve_loop(self):
         """
@@ -555,11 +568,13 @@ class MKTLComs:
         """
         getLogger(__name__).debug(f'Starting server loop for {self.identity} at {self._bind_address}')
         self._router = self._ctx.socket(zmq.ROUTER)
+        getLogger(__name__).info('ROUTER socket created and ready to bind')
         self._router.setsockopt(zmq.IDENTITY, self.identity.encode())
         if self._bind_address:
             self._router.bind(self._bind_address)
 
         self._dealer = self._ctx.socket(zmq.DEALER)
+        getLogger(__name__).info('DEALER socket created and connected')
         self._dealer.setsockopt(zmq.IDENTITY, self.identity.encode())
 
         poller = zmq.Poller()
@@ -572,13 +587,14 @@ class MKTLComs:
             for sock in (self._router, self._dealer):
                 if sock in events and events[sock] == zmq.POLLIN:
                     msg = sock.recv_multipart()
+                    getLogger(__name__).debug('Received multipart message on SUB socket')
                     m, sender_id, err = MKTLMessage.try_parse(self, msg)
                     getLogger(__name__).debug(f'Received message: {m}, {sender_id}, {err}')
                     if m:
                         try:
                             self._handle_message(m)
                         except Exception as e:
-                            logging.error(f'Exception while handling message: {e}', exc_info=True)
+                            getLogger(__name__).error(f'Exception while handling message: {e}', exc_info=True)
                     elif sender_id:
                         frames = [
                             sender_id,
@@ -595,7 +611,7 @@ class MKTLComs:
                     item = self._send_queue.get_nowait()
                     if item.msg_type in ('ack', 'response', 'error'):
                         getLogger(__name__).debug(f'Sending with router: {item}')
-                        self._router.send_multipart([self.identity.encode()]+item.get_frames())
+                        self._router.send_multipart(item.get_frames())
                     else:
                         self._connect_for_key(item.key)
                         getLogger(__name__).debug(f'Sending with dealer: {item}')
@@ -708,17 +724,22 @@ class MKTLComs:
         Routes incoming `get` or `set` requests to the correct registered handler
         based on key match, or responds with an error if unmatched.
         """
+        getLogger(__name__).debug(f'Handling message for key: {m.key}, type: {m.msg_type}')
         if m.key in self.authoritative_keys:
             try:
                 result = self.authoritative_keys[m.key](m)
                 if result is not None:
                     m.respond(result)
+                getLogger(__name__).debug(f'Sent response for key: {m.key}')
             except Exception as e:
                 m.fail(str(e))
+            getLogger(__name__).warning(f'Sent error response for key: {m.key}')
         elif m.key.endswith('.mktl_control'):
             m.ack()
+            getLogger(__name__).debug(f'Sent ack for key: {m.key}')
         else:
             m.fail('Unknown key')
+            getLogger(__name__).warning(f'Sent error response for key: {m.key}')
 
     def subscribe(self, key_prefix: str, callback: Optional[Callable] = None) -> MKTLSubscription:
         """
@@ -751,8 +772,10 @@ class MKTLComs:
         Also applies any deferred subscriptions from `subscribe()`.
         """
         self._sub_socket = self._ctx.socket(zmq.SUB)
+        getLogger(__name__).info('SUB socket created for telemetry listening')
         self._sub_socket.setsockopt(zmq.LINGER, 0)
         self._sub_socket.connect(self._sub_address)  # assumes this is set via connect_pub()
+        getLogger(__name__).debug(f'Connected SUB socket to {self._sub_address}')
 
         while self._running:
             with self._pending_lock:
@@ -762,6 +785,7 @@ class MKTLComs:
 
             try:
                 msg_parts = self._sub_socket.recv_multipart()
+                getLogger(__name__).debug('Received multipart message on SUB socket')
                 if len(msg_parts) >= 2:
                     key = msg_parts[0].decode()
                     payload = json.loads(msg_parts[1].decode())
@@ -774,14 +798,14 @@ class MKTLComs:
                                 try:
                                     cb(msg)
                                 except Exception as e:
-                                    logging.error(f'Callback failed for key {key}: {e}')
+                                    getLogger(__name__).error(f'Callback failed for key {key}: {e}')
 
                     for prefix, queues in self._sub_listeners.items():
                         if key.startswith(prefix):
                             for listener in queues:
                                 listener.put(msg)
             except Exception as e:
-                logging.error(f'Error in _listen_loop: {e}')
+                getLogger(__name__).error(f'Error in _listen_loop: {e}')
 
     def _publish_loop(self):
         """
@@ -794,7 +818,9 @@ class MKTLComs:
             return
 
         socket = self._ctx.socket(zmq.PUB)
+        getLogger(__name__).info('PUB socket created for telemetry publishing')
         socket.bind(self._pub_address)
+        getLogger(__name__).info(f'Bound PUB socket to {self._pub_address}')
         while True:
             try:
                 key, payload, binary = self._publish_queue.get()
@@ -805,10 +831,12 @@ class MKTLComs:
                     frames = [key.encode(), json.dumps(payload).encode()]
 
                 socket.send_multipart(frames)
+                getLogger(__name__).debug(f'Sent multipart message: {key}')
             except Exception:
                 raise  ##TODO
 
     def publish(self, key: str, payload: dict, binary_blob: Optional[bytes] = None):
+        getLogger(__name__).debug(f'Queueing message for key: {key}')
         """
         Thread-safe publish interface for telemetry or binary data.
 
