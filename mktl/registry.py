@@ -12,6 +12,7 @@ To run:
 """
 from mktlcoms import MKTLComs, MKTLMessage
 import threading
+from logging import getLogger
 
 
 class RegistryServer:
@@ -35,13 +36,15 @@ class RegistryServer:
             identity: The ZMQ identity to use for this server.
             authoritative_keys: Optional handlers to override default ones.
         """
-
+        getLogger(__name__).info(f"Initializing RegistryServer with identity={identity}, bind_addr={bind_addr}")
         authoritative_keys = {'registry.owner': self._handle_owner,
                               'registry.config': self._handle_config}
 
         self.coms = MKTLComs(identity=identity, authoritative_keys=authoritative_keys,
                              shutdown_callback=self.shutdown)
         self.coms.bind(bind_addr)
+        getLogger(__name__).debug("RegistryServer: MKTLComs instance created and bound.")
+
         self._store = {}  # key → {identity, address}
         self._identity_to_keys = {}  # identity → set(keys)
 
@@ -52,13 +55,16 @@ class RegistryServer:
         This launches the background communication thread and enables key lookup
         and registration services.
         """
+        getLogger(__name__).info("Starting RegistryServer...")
         self.coms.start()
+        getLogger(__name__).debug("RegistryServer started and ready to handle requests.")
 
     def shutdown(self):
+        getLogger(__name__).warning("Shutdown called on RegistryServer.")
         self.coms.stop()
         exit(0)
 
-    def _handle_owner(self, m:MKTLMessage):
+    def _handle_owner(self, m: MKTLMessage):
         """
         Respond to `get` or `set` requests on `registry.owner`.
 
@@ -70,26 +76,34 @@ class RegistryServer:
         """
         method = m.msg_type
         context = m.json_data
+        getLogger(__name__).debug(f"Handling owner request: method={method}, payload={context}")
+
         if method == 'get':
             target_key = context.get('key')
             if not target_key:
+                getLogger(__name__).warning("Missing 'key' in owner get request.")
                 return {'error': "Missing 'key'"}
             entry = self._store.get(target_key)
+            getLogger(__name__).debug(f"Lookup result for key={target_key}: {entry}")
             return entry or {'error': 'Key not found'}
 
         elif method == 'set':
-            key_name = context.get('key')
+            key_names = context.get('keys')
             ident = context.get('identity')
             addr = context.get('address')
-            if not all([key_name, ident, addr]):
+            if not all([key_names, ident, addr]):
+                getLogger(__name__).warning("Incomplete set request in registry.owner.")
                 return {'error': 'Missing key, identity, or address'}
-            self._store[key_name] = {'identity': ident, 'address': addr}
-            self._identity_to_keys.setdefault(ident, set()).add(key_name)
+            for k in key_names:
+                self._store[k] = {'identity': ident, 'address': addr}
+                self._identity_to_keys.setdefault(ident, set()).add(k)
+                getLogger(__name__).info(f"Registered ownership: key={k}, identity={ident}, address={addr}")
             return {'ok': True}
 
+        getLogger(__name__).warning(f"Unsupported method in owner request: {method}")
         return {'error': f'Unsupported method: {method}'}
 
-    def _handle_config(self, m:MKTLMessage):
+    def _handle_config(self, m: MKTLMessage):
         """
         Respond to `get` or `set` requests on `registry.config`.
 
@@ -101,11 +115,15 @@ class RegistryServer:
         """
         method = m.msg_type
         context = m.json_data
+        getLogger(__name__).debug(f"Handling config request: method={method}, payload={context}")
+
         if method == 'get':
             ident = context.get('identity')
             if not ident:
+                getLogger(__name__).warning("Missing 'identity' in config get request.")
                 return {'error': "Missing 'identity'"}
             keys = list(self._identity_to_keys.get(ident, []))
+            getLogger(__name__).debug(f"Returning keys for identity={ident}: {keys}")
             return {'keys': keys}
 
         elif method == 'set':
@@ -113,14 +131,16 @@ class RegistryServer:
             addr = context.get('address')
             keys = context.get('keys')
             if not all([ident, addr, keys]):
+                getLogger(__name__).warning("Incomplete set request in registry.config.")
                 return {'error': 'Missing identity, address, or keys'}
             for k in keys:
                 self._store[k] = {'identity': ident, 'address': addr}
                 self._identity_to_keys.setdefault(ident, set()).add(k)
+                getLogger(__name__).info(f"Registered config for identity={ident}, address={addr}, keys={k}")
             return {'ok': True}
 
+        getLogger(__name__).warning(f"Unsupported method in config request: {method}")
         return {'error': f'Unsupported method: {method}'}
-
 
 
 if __name__ == '__main__':
