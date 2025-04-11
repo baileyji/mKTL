@@ -679,7 +679,7 @@ class MKTLComs:
             t.join()
         logger.debug("All communication threads joined.")
 
-    def get(self, key: str, payload: Any, timeout: float = 2000.0, destination: Optional[str] = None) -> MKTLMessage:
+    def get(self, key: str, payload: Any=None, timeout: float = 2000.0, destination: Optional[str] = None) -> MKTLMessage:
         """
         Send a `get` request to another node and wait for its response.
 
@@ -696,6 +696,8 @@ class MKTLComs:
         """
         getLogger(__name__).debug(f"Initiating 'get' request for key={key}, destination={destination}")
         resolved = self._resolve_destination(key, destination)
+        if payload is None:
+            payload = {}
         return self._send_request('get', key, payload, timeout, None, resolved)
 
     def set(self, key: str, value: Any, timeout: float = 2000.0, binary_blob: Optional[bytes] = None,
