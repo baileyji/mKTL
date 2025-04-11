@@ -23,7 +23,6 @@ import uuid
 import json
 import queue
 import time
-import logging
 from typing import Callable, Dict, Optional, Any, List, Tuple, Union, Set
 
 
@@ -67,6 +66,33 @@ class MKTLMessage:
 
     def __repr__(self):
         return f'<MKTLMessage {self.coms}, {self.sender_id}, {self.msg_type}, {self.req_id}, {self.key}, {self.json_data}, {self.binary_blob}>'
+
+    def _enqueue(self, msg_type: str, payload: dict, binary_blob: Optional[bytes] = None,
+                 destination: Optional[bytes] = None):
+        """
+        Internal helper to format and enqueue a reply message.
+
+        Used by `ack`, `respond`, and `fail` to prepare outbound frames.
+
+        Args:
+            msg_type: One of 'ack', 'response', or 'error'.
+            payload: Dictionary to encode into the JSON body.
+            binary_blob: Optional raw bytes to include as a final frame.
+        """
+        logger = getLogger(__name__)
+        self.msg_type = msg_type
+        self.json_data = payload
+        self.binary_blob = binary_blob
+        if destination is not None:
+            self.destination = destination
+        logger.debug(f"Enqueueing {self}")
+        self.coms._send_queue.put(self)
+
+    def has_blob(self):
+        """
+        Returns True if the message includes a binary frame.
+        """
+        return self.binary_blob is not None
 
     @classmethod
     def from_frames(cls, coms, msg: List[bytes], received_by: Optional[bytes] = None):
@@ -120,6 +146,31 @@ class MKTLMessage:
         logger.debug(f"Parsed frames into {message}")
         return message
 
+    @staticmethod
+    def try_parse(coms, msg: List[bytes], received_by: Optional[bytes] = None) -> Tuple[Optional['MKTLMessage'], Optional[bytes], Optional[str]]:
+        """
+        Attempt to parse a multipart message into an MKTLMessage.
+
+        Returns a tuple of (message, router_identity, error). If parsing fails, the
+        message and router_identity will be None, and error will contain a string reason.
+
+        Args:
+            coms: The parent MKTLComs instance.
+            msg: List of ZeroMQ frames.
+
+        Returns:
+            Tuple of (MKTLMessage or None, router_identity or None, error string or None)
+        """
+        logger = getLogger(__name__)
+        logger.debug(f'Trying to parse frames:\n   '+',\n   '.join(map(str, msg)))
+        try:
+            m = MKTLMessage.from_frames(coms, msg, received_by=received_by)
+            return m, None, None
+        except Exception as e:
+            logger.error(f"Failed to parse MKTLMessage: {e}")
+            sender_id = msg[0] if len(msg) >= 1 else None
+            return None, sender_id, str(e)
+
     def to_frames(self) -> List[bytes]:
         """
         Build the ZeroMQ frame list for this message.
@@ -158,31 +209,6 @@ class MKTLMessage:
         if self.binary_blob:
             frames.append(self.binary_blob)
         return frames
-
-    @staticmethod
-    def try_parse(coms, msg: List[bytes], received_by: Optional[bytes] = None) -> Tuple[Optional['MKTLMessage'], Optional[bytes], Optional[str]]:
-        """
-        Attempt to parse a multipart message into an MKTLMessage.
-
-        Returns a tuple of (message, router_identity, error). If parsing fails, the
-        message and router_identity will be None, and error will contain a string reason.
-
-        Args:
-            coms: The parent MKTLComs instance.
-            msg: List of ZeroMQ frames.
-
-        Returns:
-            Tuple of (MKTLMessage or None, router_identity or None, error string or None)
-        """
-        logger = getLogger(__name__)
-        logger.debug(f'Trying to parse frames:\n   '+',\n   '.join(map(str, msg)))
-        try:
-            m = MKTLMessage.from_frames(coms, msg, received_by=received_by)
-            return m, None, None
-        except Exception as e:
-            logger.error(f"Failed to parse MKTLMessage: {e}")
-            sender_id = msg[0] if len(msg) >= 1 else None
-            return None, sender_id, str(e)
 
     def is_reply(self):
         """
@@ -247,32 +273,6 @@ class MKTLMessage:
             else:
                 logger.debug(f"Already responded for {self}")
 
-    def _enqueue(self, msg_type: str, payload: dict, binary_blob: Optional[bytes] = None,
-                 destination: Optional[bytes] = None):
-        """
-        Internal helper to format and enqueue a reply message.
-
-        Used by `ack`, `respond`, and `fail` to prepare outbound frames.
-
-        Args:
-            msg_type: One of 'ack', 'response', or 'error'.
-            payload: Dictionary to encode into the JSON body.
-            binary_blob: Optional raw bytes to include as a final frame.
-        """
-        logger = getLogger(__name__)
-        self.msg_type = msg_type
-        self.json_data = payload
-        self.binary_blob = binary_blob
-        if destination is not None:
-            self.destination = destination
-        logger.debug(f"Enqueueing {self}")
-        self.coms._send_queue.put(self)
-
-    def has_blob(self):
-        """
-        Returns True if the message includes a binary frame.
-        """
-        return self.binary_blob is not None
 
 
 class MKTLSubscription:
@@ -294,6 +294,21 @@ class MKTLSubscription:
         logger.debug("Creating MKTLSubscription instance...")
         self._queue = queue.Queue()
         self._closed = False
+
+    def __iter__(self):
+        """
+        Yield all messages placed in the subscription queue.
+
+        Blocks until the subscription is closed or an error occurs.
+        """
+        logger = getLogger(__name__)
+        logger.debug("Starting iteration over MKTLSubscription messages.")
+        while not self._closed:
+            try:
+                msg = self._queue.get(timeout=0.5)
+                yield msg
+            except queue.Empty:
+                continue
 
     def put(self, msg: MKTLMessage):
         """
@@ -317,21 +332,6 @@ class MKTLSubscription:
         logger = getLogger(__name__)
         logger.info("Closing MKTLSubscription.")
         self._closed = True
-
-    def __iter__(self):
-        """
-        Yield all messages placed in the subscription queue.
-
-        Blocks until the subscription is closed or an error occurs.
-        """
-        logger = getLogger(__name__)
-        logger.debug("Starting iteration over MKTLSubscription messages.")
-        while not self._closed:
-            try:
-                msg = self._queue.get(timeout=0.5)
-                yield msg
-            except queue.Empty:
-                continue
 
 
 class MKTLComs:
@@ -461,18 +461,6 @@ class MKTLComs:
 
         self.set('registry.config', payload)
 
-        # ctx = zmq.Context.instance()
-        # s = ctx.socket(zmq.DEALER)
-        # s.setsockopt(zmq.IDENTITY, self.identity.encode())
-        # s.connect(self.registry_addr)
-        # req_id = uuid.uuid4().bytes
-        #
-        # frames = [b'registry', b'', b'set', req_id, b'registry.config', json.dumps(payload).encode()
-        #           ]
-        # s.send_multipart(frames)
-        # logger.info("Registry config set message sent.")
-        # s.close()
-
     def _query_registry_owner(self, key: str) -> Optional[Tuple[str, str]]:
         """
         Query the registry for the owner of a specific key.
@@ -501,40 +489,6 @@ class MKTLComs:
         else:
             logger.warning(f"Could not resolve owner for key={key}")
             return None
-
-        # ctx = zmq.Context.instance()
-        # s = ctx.socket(zmq.DEALER)
-        # temp_id = f'query-{uuid.uuid4().hex[:8]}'
-        # s.setsockopt(zmq.IDENTITY, temp_id.encode())
-        # s.connect(self.registry_addr)
-        # poller = zmq.Poller()
-        # poller.register(s, zmq.POLLIN)
-        #
-        # req_id = uuid.uuid4().bytes
-        # json_data = json.dumps({'key': key}).encode()
-        #
-        # frames = [
-        #     b'registry', b'', b'get', req_id,
-        #     b'registry.owner', json_data
-        # ]
-        # s.send_multipart(frames)
-        # logger.debug(f"Sent registry owner query for key={key}")
-        #
-        # socks = dict(poller.poll(timeout=2000))
-        # if s in socks:
-        #     reply = s.recv_multipart()
-        #     logger.debug(f'Received multipart message on {s}')
-        #     _, message_type, req_id, key, json_data = reply[:5]
-        #     payload = json.loads(json_data.decode())
-        #     identity = payload.get('identity')
-        #     address = payload.get('address')
-        #     if identity and address:
-        #         self._routing_table[key.decode()] = (identity, address)
-        #         logger.info(f"Registry resolution for {key.decode()}: identity={identity}, address={address}")
-        #         return identity, address
-        #
-        # logger.warning(f"Could not resolve owner for key={key}")
-        # return None
 
     def _resolve_destination(self, key: str, destination: Optional[str]) -> str:
         """
@@ -576,155 +530,6 @@ class MKTLComs:
             List of keys owned by that identity.
         """
         pass
-
-    def bind(self, address: str):
-        """
-        Bind the ROUTER socket for handling mKTL requests.
-
-        Must be called before `start()`.
-
-        Args:
-            address: A ZeroMQ bind address (e.g., 'tcp://*:5571').
-        """
-        logger = getLogger(__name__)
-        logger.info(f"Setting binding ROUTER socket address to {address}")
-        self._bind_address = address
-
-    def _connect_for_key(self, key: str):
-        """
-        Connect the DEALER socket for sending mKTL requests to the identity.
-
-        Args:
-            key: The key for which a connections is required.
-        """
-        logger = getLogger(__name__)
-        identity, address = self._routing_table[key]
-        if address not in self._connected_addresses:
-            self._dealer.connect(address)
-            self._connected_addresses.add(address)
-            logger.info(f"Dealer connected to {address} for key={key}")
-
-    def register_key_handler(self, key: str, handler: Callable):
-        """
-        Register a key handler dynamically after MKTLComs has been created.
-
-        This augments the `authoritative_keys` passed to `__init__`.
-
-        Args:
-            key: Key this handler responds to.
-            func: Function that accepts MKTLMessage and optionally returns a result.
-        """
-        self.authoritative_keys[key] = handler
-        getLogger(__name__).debug(f"Registered key handler for {key}")
-
-    def on(self, key: str):
-        """
-        Register a handler function for a specific key.
-
-        This decorator enables a natural way to associate `get`/`set` logic with an mKTL key.
-        Intended for use by daemons exposing state or control endpoints.
-
-        Example:
-            @coms.on("guiders.state")
-            def handle_state(msg): ...
-
-        Args:
-            key: The key this handler should respond to.
-
-        Returns:
-            A decorator that registers the wrapped function.
-        """
-        def wrapper(fn):
-            self.register_key_handler(key, fn)
-            return fn
-        return wrapper
-
-    def start(self):
-        """
-        Start the internal communication and publication loops.
-
-        This method launches background threads to manage ROUTER/DEALER,
-        PUB, and SUB socket processing. It should be called after all
-        bind/connect addresses have been declared.
-        """
-        logger = getLogger(__name__)
-        logger.info("Starting MKTLComs communication threads.")
-        self._running = True
-
-        t = threading.Thread(target=self._serve_loop, daemon=True)
-        logger.info('Starting serve loop thread')
-        t.start()
-        self._threads.append(t)
-
-        if self._pub_address:
-            t_pub = threading.Thread(target=self._publish_loop, daemon=True)
-            logger.info('Starting publish loop thread')
-            t_pub.start()
-            self._threads.append(t_pub)
-
-        if self._sub_address:
-            t_sub = threading.Thread(target=self._listen_loop, daemon=True)
-            logger.info('Starting listen loop thread')
-            t_sub.start()
-            self._threads.append(t_sub)
-
-        if self.registry_addr:
-            logger.info('Sending StoreConfig to registry')
-            self._send_registry_config()
-
-    def stop(self):
-        """
-        Cleanly shut down all communication threads and close sockets.
-        """
-        logger = getLogger(__name__)
-        logger.info("Stopping MKTLComs...")
-        self._running = False
-        for t in self._threads:
-            t.join()
-        logger.debug("All communication threads joined.")
-
-    def get(self, key: str, payload: Any=None, timeout: float = 2000.0, destination: Optional[str] = None) -> MKTLMessage:
-        """
-        Send a `get` request to another node and wait for its response.
-
-        This method blocks for the given timeout and will attempt to resolve the key's
-        destination either directly or via the registry.
-
-        Args:
-            key: The fully-qualified mKTL key to retrieve.
-            timeout: Timeout in seconds for the operation.
-            destination: Optional identity override for direct routing.
-
-        Returns:
-            A tuple (value, binary_blob) from the response.
-        """
-        getLogger(__name__).debug(f"Initiating 'get' request for key={key}, destination={destination}")
-        resolved = self._resolve_destination(key, destination)
-        if payload is None:
-            payload = {}
-        return self._send_request('get', key, payload, timeout, None, resolved)
-
-    def set(self, key: str, value: Any, timeout: float = 2000.0, binary_blob: Optional[bytes] = None,
-            destination: Optional[str] = None) -> MKTLMessage:
-        """
-        Send a `set` request with a value and optional binary payload.
-
-        Used to update state or trigger actions on another service. Will resolve
-        routing and manage framing transparently.
-
-        Args:
-            key: The mKTL key to modify.
-            value: JSON-serializable object to send.
-            timeout: Maximum time to wait for acknowledgment and response.
-            binary_blob: Optional bytes payload (frame 6).
-            destination: Override automatic routing.
-
-        Returns:
-            A tuple (value, binary_blob) from the response.
-        """
-        getLogger(__name__).debug(f"Initiating 'set' request for key={key}, value={value}, destination={destination}")
-        resolved = self._resolve_destination(key, destination)
-        return self._send_request('set', key, value, timeout, binary_blob, destination=resolved)
 
     def _send_request(self, msg_type: str, key: str, payload: dict, timeout: float, binary_blob: Optional[bytes] = None,
                       destination: Optional[str] = None) -> MKTLMessage:
@@ -800,32 +605,19 @@ class MKTLComs:
             m.fail('Unknown key')
             logger.warning(f'Sent error response for key: {m.key}')
 
-    def subscribe(self, key_prefix: str, callback: Optional[Callable] = None) -> MKTLSubscription:
+    def _connect_for_key(self, key: str):
         """
-        Subscribe to messages whose topic starts with a given prefix.
-
-        This enables both callback-based and iterator-based consumption of published data.
+        Connect the DEALER socket for sending mKTL requests to the identity.
 
         Args:
-            key_prefix: Topic prefix to subscribe to.
-            callback: Optional function to call with each received message.
-
-        Returns:
-            MKTLSubscription object for manual message retrieval.
+            key: The key for which a connections is required.
         """
         logger = getLogger(__name__)
-        logger.info(f"Requesting subscription to prefix={key_prefix}")
-        with self._pending_lock:
-            self._pending_subscriptions.add(key_prefix)
-
-        if callback:
-            self._sub_callbacks.setdefault(key_prefix, []).append(callback)
-            logger.debug(f"Callback registered for prefix={key_prefix}")
-
-        listener = MKTLSubscription()
-        self._sub_listeners.setdefault(key_prefix, []).append(listener)
-        logger.debug(f"Created MKTLSubscription for prefix={key_prefix}")
-        return listener
+        identity, address = self._routing_table[key]
+        if address not in self._connected_addresses:
+            self._dealer.connect(address)
+            self._connected_addresses.add(address)
+            logger.info(f"Request socket {self._dealer} connected to {address} for key={key}")
 
     def _serve_loop(self):
         """
@@ -837,13 +629,15 @@ class MKTLComs:
         logger.debug(f'Starting server loop for {self.identity} at {self._bind_address}')
         self._router = self._ctx.socket(zmq.ROUTER)
         self._router.setsockopt(zmq.IDENTITY, self.identity.encode())
+        self._router.setsockopt(zmq.ROUTER_MANDATORY, 1)
         if self._bind_address:
-            logger.info('response ROUTER socket created and bound')
             self._router.bind(self._bind_address)
+            logger.info(f'Response socket {self._router} created')
 
         self._dealer = self._ctx.socket(zmq.ROUTER)
-        logger.info('request ROUTER socket created and connected')
         self._dealer.setsockopt(zmq.IDENTITY, self.identity.encode())
+        self._dealer.setsockopt(zmq.ROUTER_MANDATORY, 1)
+        logger.info(f'Request socket {self._dealer} created')
 
         poller = zmq.Poller()
         poller.register(self._router, zmq.POLLIN)
@@ -858,13 +652,7 @@ class MKTLComs:
                     logger.debug(f'Received multipart message on {sock}')
                     m, sender_id, err = MKTLMessage.try_parse(self, msg, received_by=sock.identity)
                     if err:
-                        logger.warning(f'Received malformed message from {sender_id}: {err}')
-                        # frames = [
-                        #     sender_id, b'', b'error',
-                        #     uuid.uuid4().bytes, b'',
-                        #     json.dumps({'error': f'Malformed message: {err}'}).encode()
-                        # ]
-                        # sock.send_multipart(frames)
+                        logger.warning(f'Received malformed message from {sender_id}: {err}. Ignoring')
                     elif m.is_reply():
                         logger.debug(f'Received reply for request {m.req_id}')
                         with self._client_lock:
@@ -976,20 +764,21 @@ class MKTLComs:
                 logger.error(f"Error in _publish_loop: {e}", exc_info=True)
                 raise   #TODO
 
-    def publish(self, key: str, payload: dict, binary_blob: Optional[bytes] = None):
+    def bind(self, address: str):
         """
-        Thread-safe publish interface for telemetry or binary data.
+        Bind the ROUTER socket for handling mKTL requests.
 
-        Enqueues the provided key and payload for broadcasting via the PUB socket.
-        The actual ZeroMQ socket is owned by the background _publish_loop thread.
+        Must be called before `start()`.
 
         Args:
-            key: Full keypath (e.g., 'adc.temperature') or 'bulk:keyname' for binary.
-            payload: JSON-serializable dictionary.
-            binary_blob: Optional bytes object to send as the final frame.
+            address: A ZeroMQ bind address (e.g., 'tcp://*:5571').
         """
-        getLogger(__name__).debug(f'Queueing message for key: {key}')
-        self._publish_queue.put((key, payload, binary_blob))
+        #TODO change to bind address property setter
+        if self._running:
+            raise RuntimeError('Must not bind before starting.')
+        logger = getLogger(__name__)
+        logger.info(f"Setting bind address for inbound command/ outbound response ROUTER socket address to {address}")
+        self._bind_address = address
 
     def bind_pub(self, address: str):
         """
@@ -1011,3 +800,167 @@ class MKTLComs:
         """
         getLogger(__name__).info(f"Connecting SUB socket to {address}")
         self._sub_address = address
+
+    def register_key_handler(self, key: str, handler: Callable):
+        """
+        Register a key handler dynamically after MKTLComs has been created.
+
+        This augments the `authoritative_keys` passed to `__init__`.
+
+        Args:
+            key: Key this handler responds to.
+            func: Function that accepts MKTLMessage and optionally returns a result.
+        """
+        self.authoritative_keys[key] = handler
+        getLogger(__name__).debug(f"Registered key handler for {key}")
+
+    def on_key(self, key: str):
+        """
+        Register a handler function for a specific key.
+
+        This decorator enables a natural way to associate `get`/`set` logic with an mKTL key.
+        Intended for use by daemons exposing state or control endpoints.
+
+        Example:
+            @coms.on("guiders.state")
+            def handle_state(msg): ...
+
+        Args:
+            key: The key this handler should respond to.
+
+        Returns:
+            A decorator that registers the wrapped function.
+        """
+        def wrapper(fn):
+            self.register_key_handler(key, fn)
+            return fn
+        return wrapper
+
+    def start(self):
+        """
+        Start the internal communication and publication loops.
+
+        This method launches background threads to manage ROUTER/DEALER,
+        PUB, and SUB socket processing. It should be called after all
+        bind/connect addresses have been declared.
+        """
+        logger = getLogger(__name__)
+        logger.info("Starting MKTLComs communication threads.")
+        self._running = True
+
+        t = threading.Thread(target=self._serve_loop, daemon=True)
+        logger.info('Starting serve loop thread')
+        t.start()
+        self._threads.append(t)
+
+        if self._pub_address:
+            t_pub = threading.Thread(target=self._publish_loop, daemon=True)
+            logger.info('Starting publish loop thread')
+            t_pub.start()
+            self._threads.append(t_pub)
+
+        if self._sub_address:
+            t_sub = threading.Thread(target=self._listen_loop, daemon=True)
+            logger.info('Starting listen loop thread')
+            t_sub.start()
+            self._threads.append(t_sub)
+
+        if self.registry_addr:
+            logger.info('Sending StoreConfig to registry')
+            self._send_registry_config()
+
+    def stop(self):
+        """
+        Cleanly shut down all communication threads and close sockets.
+        """
+        logger = getLogger(__name__)
+        logger.info("Stopping MKTLComs...")
+        self._running = False
+        for t in self._threads:
+            t.join()
+        logger.debug("All communication threads joined.")
+
+    def get(self, key: str, payload: Any=None, timeout: float = 2000.0, destination: Optional[str] = None) -> MKTLMessage:
+        """
+        Send a `get` request to another node and wait for its response.
+
+        This method blocks for the given timeout and will attempt to resolve the key's
+        destination either directly or via the registry.
+
+        Args:
+            key: The fully-qualified mKTL key to retrieve.
+            timeout: Timeout in seconds for the operation.
+            destination: Optional identity override for direct routing.
+
+        Returns:
+            A tuple (value, binary_blob) from the response.
+        """
+        getLogger(__name__).debug(f"Initiating 'get' request for key={key}, destination={destination}")
+        resolved = self._resolve_destination(key, destination)
+        if payload is None:
+            payload = {}
+        return self._send_request('get', key, payload, timeout, None, resolved)
+
+    def set(self, key: str, value: Any, timeout: float = 2000.0, binary_blob: Optional[bytes] = None,
+            destination: Optional[str] = None) -> MKTLMessage:
+        """
+        Send a `set` request with a value and optional binary payload.
+
+        Used to update state or trigger actions on another service. Will resolve
+        routing and manage framing transparently.
+
+        Args:
+            key: The mKTL key to modify.
+            value: JSON-serializable object to send.
+            timeout: Maximum time to wait for acknowledgment and response.
+            binary_blob: Optional bytes payload (frame 6).
+            destination: Override automatic routing.
+
+        Returns:
+            A tuple (value, binary_blob) from the response.
+        """
+        getLogger(__name__).debug(f"Initiating 'set' request for key={key}, value={value}, destination={destination}")
+        resolved = self._resolve_destination(key, destination)
+        return self._send_request('set', key, value, timeout, binary_blob, destination=resolved)
+
+    def subscribe(self, key_prefix: str, callback: Optional[Callable] = None) -> MKTLSubscription:
+        """
+        Subscribe to messages whose topic starts with a given prefix.
+
+        This enables both callback-based and iterator-based consumption of published data.
+
+        Args:
+            key_prefix: Topic prefix to subscribe to.
+            callback: Optional function to call with each received message.
+
+        Returns:
+            MKTLSubscription object for manual message retrieval.
+        """
+        logger = getLogger(__name__)
+        logger.info(f"Requesting subscription to prefix={key_prefix}")
+        with self._pending_lock:
+            self._pending_subscriptions.add(key_prefix)
+
+        if callback:
+            self._sub_callbacks.setdefault(key_prefix, []).append(callback)
+            logger.debug(f"Callback registered for prefix={key_prefix}")
+
+        listener = MKTLSubscription()
+        self._sub_listeners.setdefault(key_prefix, []).append(listener)
+        logger.debug(f"Created MKTLSubscription for prefix={key_prefix}")
+        return listener
+
+    def publish(self, key: str, payload: dict, binary_blob: Optional[bytes] = None):
+        """
+        Thread-safe publish interface for telemetry or binary data.
+
+        Enqueues the provided key and payload for broadcasting via the PUB socket.
+        The actual ZeroMQ socket is owned by the background _publish_loop thread.
+
+        Args:
+            key: Full keypath (e.g., 'adc.temperature') or 'bulk:keyname' for binary.
+            payload: JSON-serializable dictionary.
+            binary_blob: Optional bytes object to send as the final frame.
+        """
+        getLogger(__name__).debug(f'Queueing message for key: {key}')
+        self._publish_queue.put((key, payload, binary_blob))
