@@ -86,11 +86,11 @@ class MKTLMessage:
         logger = getLogger(__name__)
         logger.debug("Attempting to parse MKTLMessage from frames...")
 
-        if not msg or len(msg) < 6 and not (msg[0] == b'' and len(msg) < 7):
+        if not msg or len(msg) < 8 and not (msg[0] == b'' and len(msg) < 7):
             logger.error("Malformed message: insufficient frames")
             raise ValueError('Malformed message: insufficient frames')
 
-        if msg[0] == b'':
+        if msg[0] == b'':   # inbound request
             #  dest ident stripped by sending socket (ROUTER).
             #  if stripped by receiving socker (REP) null frame would also be gone
             # dest_id was us
@@ -99,9 +99,10 @@ class MKTLMessage:
             null, sender_id, null2, msg_type, req_id, key, json_payload = msg[:count]  # dealer to router
         else:
             # sender_id, null, message  delaer sent to router, routed added sender
-            count = 6
-            sender_id, null, msg_type, req_id, key, json_payload = msg[:count]
-            if not null == b'':# and null2 == b'':
+            # sender_id, null, message  delaer sent to router, routed added sender
+            count = 8
+            sender_id, null, sender_id2, null2, msg_type, req_id, key, json_payload = msg[:count]
+            if not null == b'' and null2 == b'':
                 logger.error("Malformed message: null frames in wrong places")
                 raise ValueError("Malformed message: null frames in wrong places")
 
@@ -132,15 +133,18 @@ class MKTLMessage:
         #Router to dealer router requires destination id and will strip it
         #Dealer to router, router will prepend sender id
 
-        if self.is_request():  #out over a dealer
+        if self.is_request():  #request out over a router
             frames = [
+                self.destination,
+                b'',
+                self.sender_id,
                 b'',
                 self.msg_type.encode(),
                 self.req_id,
                 self.key.encode(),
                 json.dumps(self.json_data).encode()
             ]
-        else:  #out over a router
+        else:  #response out over a router
             frames = [
                 self.destination,
                 b'',
@@ -171,7 +175,7 @@ class MKTLMessage:
             Tuple of (MKTLMessage or None, router_identity or None, error string or None)
         """
         logger = getLogger(__name__)
-        # logger.debug(f'Trying to parse frames:\n   '+',\n   '.join(map(str, msg)))
+        logger.debug(f'Trying to parse frames:\n   '+',\n   '.join(map(str, msg)))
         try:
             m = MKTLMessage.from_frames(coms, msg, received_by=received_by)
             return m, None, None
@@ -834,11 +838,11 @@ class MKTLComs:
         self._router = self._ctx.socket(zmq.ROUTER)
         self._router.setsockopt(zmq.IDENTITY, self.identity.encode())
         if self._bind_address:
-            logger.info('ROUTER socket created and bound')
+            logger.info('response ROUTER socket created and bound')
             self._router.bind(self._bind_address)
 
-        self._dealer = self._ctx.socket(zmq.DEALER)
-        logger.info('DEALER socket created and connected')
+        self._dealer = self._ctx.socket(zmq.ROUTER)
+        logger.info('request ROUTER socket created and connected')
         self._dealer.setsockopt(zmq.IDENTITY, self.identity.encode())
 
         poller = zmq.Poller()
@@ -881,11 +885,11 @@ class MKTLComs:
                     item = self._send_queue.get_nowait()
                     frames = item.to_frames()
                     if item.is_reply():
-                        logger.debug(f'Sending with router: {item}')#\n' + '   ,\n'.join(map(str, frames)))
+                        logger.debug(f'Sending with response router: {item}\n' + '   ,\n'.join(map(str, frames)))
                         self._router.send_multipart(frames)
                     else:
                         self._connect_for_key(item.key)
-                        logger.debug(f'Sending with dealer: {item}')#\n' + '   ,\n'.join(map(str, frames)))
+                        logger.debug(f'Sending with request "dealer": {item}\n' + '   ,\n'.join(map(str, frames)))
                         self._dealer.send_multipart(frames)
             except queue.Empty:
                 pass
