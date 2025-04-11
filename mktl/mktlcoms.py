@@ -18,6 +18,7 @@ Typical usage:
 from logging import getLogger
 import itertools
 import zmq
+from zmq.utils.monitor import parse_monitor_message
 import threading
 import uuid
 import json
@@ -630,9 +631,13 @@ class MKTLComs:
         self._router = self._ctx.socket(zmq.ROUTER)
         self._router.setsockopt(zmq.IDENTITY, self.identity.encode())
         self._router.setsockopt(zmq.ROUTER_MANDATORY, 1)
+        self._router.monitor("inproc://router.monitor", zmq.EVENT_ACCEPTED)
+        mon_sock = self._ctx.socket(zmq.PAIR)
+
         if self._bind_address:
             self._router.bind(self._bind_address)
             logger.info(f'Response socket {self._router} created')
+            mon_sock.connect("inproc://router.monitor")
 
         self._dealer = self._ctx.socket(zmq.ROUTER)
         self._dealer.setsockopt(zmq.IDENTITY, self.identity.encode())
@@ -642,9 +647,17 @@ class MKTLComs:
         poller = zmq.Poller()
         poller.register(self._router, zmq.POLLIN)
         poller.register(self._dealer, zmq.POLLIN)
+        poller.register(mon_sock, zmq.POLLIN)
 
         while self._running:
             events = dict(poller.poll(timeout=10))
+
+            if events.get(mon_sock, None) == zmq.POLLIN:
+                raw = mon_sock.recv_multipart()
+                # Convert raw monitor event frames into a python dict
+                evt = parse_monitor_message(raw)
+                if evt['event'] == zmq.EVENT_ACCEPTED:
+                    logger.info(f"New connection accepted from {evt}")
 
             for sock in (self._router, self._dealer):
                 if sock in events and events[sock] == zmq.POLLIN:
@@ -677,6 +690,7 @@ class MKTLComs:
                         self._router.send_multipart(frames)
                     else:
                         self._connect_for_key(item.key)
+                        time.sleep(.5)
                         logger.debug(f'Sending with request "dealer": {item}\n' + '   ,\n'.join(map(str, frames)))
                         self._dealer.send_multipart(frames)
             except queue.Empty:
@@ -777,7 +791,7 @@ class MKTLComs:
         if self._running:
             raise RuntimeError('Must not bind before starting.')
         logger = getLogger(__name__)
-        logger.info(f"Setting bind address for inbound command/ outbound response ROUTER socket address to {address}")
+        logger.info(f"Setting bind address for inbound command/outbound response ROUTER socket address to {address}")
         self._bind_address = address
 
     def bind_pub(self, address: str):
@@ -788,7 +802,7 @@ class MKTLComs:
         Args:
             address: ZeroMQ address string (e.g., 'tcp://*:5560')
         """
-        getLogger(__name__).info(f"Binding PUB socket to {address}")
+        getLogger(__name__).info(f"Setting PUB socket to {address}")
         self._pub_address = address
 
     def connect_sub(self, address: str):

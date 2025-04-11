@@ -10,10 +10,11 @@ To run:
 
     python3 registry.py
 """
-from mktlcoms import MKTLComs, MKTLMessage
+from mktl.mktlcoms import MKTLComs, MKTLMessage
 import threading
 from logging import getLogger
 
+DEFAULT_REGISTRY_PORT = 5571
 
 class RegistryServer:
     """
@@ -148,9 +149,10 @@ if __name__ == '__main__':
     basicConfig(level=DEBUG)
     getLogger('mktl').setLevel(DEBUG)
     getLogger('__main__').setLevel(DEBUG)
-    reg = RegistryServer()
+    bind_addr = f'tcp://*:{DEFAULT_REGISTRY_PORT}'
+    reg = RegistryServer(bind_addr=bind_addr)
     reg.start()
 
-    getLogger(__name__).info("RegistryServer running on tcp://*:5570")
+    getLogger(__name__).info(f"RegistryServer running on {bind_addr}")
     while True:
         threading.Event().wait(60)
