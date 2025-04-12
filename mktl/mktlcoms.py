@@ -163,7 +163,7 @@ class MKTLMessage:
             Tuple of (MKTLMessage or None, router_identity or None, error string or None)
         """
         logger = getLogger(__name__)
-        logger.debug(f'Trying to parse frames:\n   '+',\n   '.join(map(str, msg)))
+        logger.debug(f'Trying to parse frames')# :\n   '+',\n   '.join(map(str, msg)))
         try:
             m = MKTLMessage.from_frames(coms, msg, received_by=received_by)
             return m, None, None
@@ -686,12 +686,12 @@ class MKTLComs:
                     item = self._send_queue.get_nowait()
                     frames = item.to_frames()
                     if item.is_reply():
-                        logger.debug(f'Sending with response router: {item}\n' + '   ,\n'.join(map(str, frames)))
+                        logger.debug(f'Sending with response router: {item}') #\n' + '   ,\n'.join(map(str, frames)))
                         self._router.send_multipart(frames)
                     else:
                         self._connect_for_key(item.key)
                         time.sleep(.5)
-                        logger.debug(f'Sending with request "dealer": {item}\n' + '   ,\n'.join(map(str, frames)))
+                        logger.debug(f'Sending with request "dealer": {item}') #\n' + '   ,\n'.join(map(str, frames)))
                         self._dealer.send_multipart(frames)
             except queue.Empty:
                 pass
