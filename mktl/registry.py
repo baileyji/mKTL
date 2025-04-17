@@ -42,8 +42,7 @@ class RegistryServer:
                               'registry.config': self._handle_config}
 
         self.coms = MKTLComs(identity=identity, authoritative_keys=authoritative_keys,
-                             shutdown_callback=self.shutdown)
-        self.coms.bind(bind_addr)
+                             shutdown_callback=self.shutdown, bind_addr=bind_addr, start=False)
         getLogger(__name__).debug("RegistryServer: MKTLComs instance created and bound.")
 
         self._store = {}  # key → {identity, address}

@@ -356,7 +356,8 @@ class MKTLComs:
     """
 
     def __init__(self, identity: Optional[str] = None, authoritative_keys: Optional[Dict[str, Callable]] = None,
-                 registry_addr: Optional[str] = None, shutdown_callback: Optional[Callable] = None):
+                 registry_addr: Optional[str] = None, shutdown_callback: Optional[Callable] = None,
+                 bind_addr: Optional[str] = None, pub_address: Optional[int] = None, start=False):
         """
         Initialize a new mKTL communications object.
 
@@ -380,12 +381,14 @@ class MKTLComs:
         self._threads = []
 
         self._bind_address = None
-        # self._connect_addresses = []
         self._send_queue = queue.Queue()
 
         self._pub_socket = None
-        self._pub_address = None
+        self._pub_address = pub_address
         self._publish_queue = queue.Queue()
+
+        if bind_addr is not None:
+            self.bind(bind_addr, set_pub=pub_address is None)
 
         self._router = None
         self._dealer = None
@@ -416,6 +419,9 @@ class MKTLComs:
         self._register_internal_handlers()
 
         logger.info(f"MKTLComs created with identity={self.identity}, registry_addr={self.registry_addr}")
+
+        if start:
+            self.start()
 
     def __repr__(self):
         return f'MKTLComs(identity={self.identity}, registry_addr={self.registry_addr})'
@@ -784,7 +790,7 @@ class MKTLComs:
                 logger.error(f"Error in _publish_loop: {e}", exc_info=True)
                 raise   #TODO
 
-    def bind(self, address: str):
+    def bind(self, address: str, set_pub=True):
         """
         Bind the ROUTER socket for handling mKTL requests.
 
@@ -792,13 +798,17 @@ class MKTLComs:
 
         Args:
             address: A ZeroMQ bind address (e.g., 'tcp://*:5571').
+            set_pub: Whether to bind the PUB socket to the adjacent port for telemetry publishing based on the bind address
         """
         #TODO change to bind address property setter
         if self._running:
-            raise RuntimeError('Must not bind before starting.')
+            raise RuntimeError('Must bind before starting.')
         logger = getLogger(__name__)
         logger.info(f"Setting bind address for inbound command/outbound response ROUTER socket address to {address}")
         self._bind_address = address
+        if set_pub:
+            pre, _, port = address.rpartition(':')
+            self.bind_pub(f'{pre}:{int(port)+1}')
 
     def bind_pub(self, address: str):
         """
@@ -808,6 +818,8 @@ class MKTLComs:
         Args:
             address: ZeroMQ address string (e.g., 'tcp://*:5560')
         """
+        if self._running:
+            raise RuntimeError('Must bind_pub before starting.')
         getLogger(__name__).info(f"Setting PUB socket to {address}")
         self._pub_address = address
 
