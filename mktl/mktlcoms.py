@@ -32,19 +32,26 @@ class MKTLMessage:
     REPLY_TYPES = {'ack', 'response', 'error'}
     REQUEST_TYPES = {'get', 'set'}
 
-    def __init__(self, coms, sender_id, msg_type, req_id, key, json_data, binary_blob=None,
+    def __init__(self, coms: "MKTLComs", sender_id, msg_type, req_id, key, json_data, binary_blob=None,
                  destination: Optional[bytes] = None, received_by: Optional[bytes] = ''):
         """
-        Initialize a new mKTL communications object.
+        Represents a message in the system, encapsulating various data including sender, type,
+        request identifier, and more.
+
+        It validates the message type against allowed types and initializes required
+        attributes. This class also facilitates thread-safe response handling by using
+        a lock mechanism.
 
         Args:
-            identity: A globally unique string name for this process.
-            authoritative_keys: An optional dictionary of key handlers that this node claims ownership of.
-            context: Optional ZeroMQ context for socket management.
-
-        This constructor sets up internal data structures, stores key handlers, and prepares
-        for future socket binding or connection. Actual communication threads are started
-        via `start()`, not automatically on init.
+            coms (MKTLComs): The communication interface used for message transmission.
+            sender_id (str): The sender identifier of the message.
+            msg_type (str): The type of the message must be one of the valid types defined in `VALID_TYPES`.
+            req_id (str): A unique identifier for the request associated with the message.
+            key (str): A key relevant to the contents or handling of the message.
+            json_data (dict): JSON-encoded data as part of the message body.
+            binary_blob (bytes, optional): A binary large object as part of the message body.
+            destination (bytes | None, optional): The destination address or identifier for the message.
+            received_by (bytes | None, optional): The identifier of the recipient or handler.
         """
         logger = getLogger(__name__)
         if msg_type not in self.VALID_TYPES:
@@ -168,7 +175,7 @@ class MKTLMessage:
             m = MKTLMessage.from_frames(coms, msg, received_by=received_by)
             return m, None, None
         except Exception as e:
-            logger.error(f"Failed to parse MKTLMessage: {e}")
+            logger.debug(f"Failed to parse MKTLMessage: {e}")
             sender_id = msg[0] if len(msg) >= 1 else None
             return None, sender_id, str(e)
 
@@ -446,14 +453,13 @@ class MKTLComs:
         and sends it as a `set` to `registry.config`.
         """
         logger = getLogger(__name__)
-        logger.debug("Attempting to send registry config...")
-
         keys = list(self.authoritative_keys.keys())
         user_keys = list(keys)
         user_keys.remove(f'{self.identity}.mktl_control')
         if not user_keys:
-            logger.debug("No authoritative keys to announce (besides mktl_control).")
+            logger.debug("No authoritative keys to announce (besides mktl_control), will not register.")
             return
+        logger.debug("Attempting to send registry config...")
 
         payload = {'identity': self.identity,
                    'address': self._bind_address,
@@ -540,7 +546,7 @@ class MKTLComs:
         Handles request framing, timeout logic, and error propagation.
         """
         logger = getLogger(__name__)
-        if self._dealer is None:
+        if not self._running:
             logger.error("Cannot send request because MKTLComs is not started.")
             raise RuntimeError('MKTLComs must be started before using get/set')
 
@@ -880,7 +886,6 @@ class MKTLComs:
             self._threads.append(t_sub)
 
         if self.registry_addr:
-            logger.info('Sending StoreConfig to registry')
             self._send_registry_config()
 
     def stop(self):
@@ -894,7 +899,7 @@ class MKTLComs:
             t.join()
         logger.debug("All communication threads joined.")
 
-    def get(self, key: str, payload: Any=None, timeout: float = 2000.0, destination: Optional[str] = None) -> MKTLMessage:
+    def get(self, key: str, payload: Any=None, timeout: float = 2.0, destination: Optional[str] = None) -> MKTLMessage:
         """
         Send a `get` request to another node and wait for its response.
 
