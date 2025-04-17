@@ -118,24 +118,24 @@ class MKTLMessage:
             An MKTLMessage instance.
         """
         logger = getLogger(__name__)
-        logger.debug("Attempting to parse MKTLMessage from frames...")
+        logger.debug("Attempting to parse MKTLMessage from frames:\n   " + ',\n   '.join(map(str, msg)))
 
-        if not msg or len(msg) < 8 and not (msg[0] == b'' and len(msg) < 7):
+        if not msg or len(msg) < 6 and not (msg[0] == b'' and len(msg) < 7):
             logger.error("Malformed message: insufficient frames")
             raise ValueError('Malformed message: insufficient frames')
 
-        if msg[0] == b'':   # inbound request
+        if msg[0] != b'':   # inbound request, dealt to our bound router
             #  dest ident stripped by sending socket (ROUTER).
             #  if stripped by receiving socker (REP) null frame would also be gone
             # dest_id was us
             # null, message
+            count = 6
+            sender_id, null, msg_type, req_id, key, json_payload = msg[:count]  # dealer to router
+        else: # inbound response, routed to our connected dealer
+            # sender_id, null, message  delaer sent to router, routed added sender
+            # sender_id, null, message  delaer sent to router, routed added sender
             count = 7
-            null, sender_id, null2, msg_type, req_id, key, json_payload = msg[:count]  # dealer to router
-        else:
-            # sender_id, null, message  delaer sent to router, routed added sender
-            # sender_id, null, message  delaer sent to router, routed added sender
-            count = 8
-            sender_id, null, sender_id2, null2, msg_type, req_id, key, json_payload = msg[:count]
+            null, sender_id, null2, msg_type, req_id, key, json_payload = msg[:count]
             if not null == b'' and null2 == b'':
                 logger.error("Malformed message: null frames in wrong places")
                 raise ValueError("Malformed message: null frames in wrong places")
@@ -189,14 +189,14 @@ class MKTLMessage:
         Returns:
             List of byte strings to send with send_multipart().
         """
-        #Router to dealer router requires destination id and will strip it
-        #Dealer to router, router will prepend sender id
+        # Router to dealer: router requires destination id and will strip it
+        # Dealer to router: router will prepend sender id
 
-        if self.is_request():  #request out over a router
+        if self.is_request():  #request out over a dealer
             frames = [
-                self.destination,
-                b'',
-                self.sender_id,
+                # self.destination,
+                # b'',
+                # self.sender_id,
                 b'',
                 self.msg_type.encode(),
                 self.req_id,
@@ -391,7 +391,7 @@ class MKTLComs:
             self.bind(bind_addr, set_pub=pub_address is None)
 
         self._router = None
-        self._dealer = None
+        self._dealer: Dict[str, zmq.Socket] = {}
         self._sub_socket = None
         self._sub_address = None
 
@@ -409,7 +409,7 @@ class MKTLComs:
             self._routing_table['registry.owner'] = ('registry', registry_addr)
             self._routing_table['registry.config'] = ('registry', registry_addr)
 
-        self._connected_addresses: Set[str] = set()
+        self._connected_addresses: dict[str, zmq.Socket] = {}
 
         self._shutdown_callback = shutdown_callback
 
@@ -620,17 +620,37 @@ class MKTLComs:
 
     def _connect_for_key(self, key: str):
         """
-        Connect the DEALER socket for sending mKTL requests to the identity.
+        Connects or reuses a DEALER socket for the provided key. If the socket for the
+        key's address is not yet established, the method creates and connects a new
+        socket. If the socket for the address exists but is not yet tied to the key,
+        it associates the existing socket with the key. If the socket already exists
+        for the key, it ensures the consistency of the connection.
 
         Args:
-            key: The key for which a connections is required.
+            key (str): The routing key for which the socket connection is established.
+
+        Returns:
+            bool: True iff a new connection was made.
         """
         logger = getLogger(__name__)
         identity, address = self._routing_table[key]
+        new_connection = False
         if address not in self._connected_addresses:
-            self._dealer.connect(address)
-            self._connected_addresses.add(address)
-            logger.info(f"Request socket {self._dealer} connected to {address} for key={key}")
+            s = self._ctx.socket(zmq.DEALER)
+            s.setsockopt(zmq.IDENTITY, self.identity.encode())
+            s.setsockopt(zmq.LINGER, 0)
+            s.connect(address)
+            self._dealer[key] = s
+            self._connected_addresses[address] = s
+            logger.info(f"Request socket {s} connected to {address} for key={key}")
+            new_connection = True
+        elif key not in self._dealer:
+            s = self._connected_addresses[address]
+            logger.info(f"Using socket {s} for key={key}")
+        else:
+            assert self._dealer[key] == self._connected_addresses[address]
+
+        return new_connection
 
     def _serve_loop(self):
         """
@@ -643,25 +663,21 @@ class MKTLComs:
         self._router = self._ctx.socket(zmq.ROUTER)
         self._router.setsockopt(zmq.IDENTITY, self.identity.encode())
         self._router.setsockopt(zmq.ROUTER_MANDATORY, 1)
-        self._router.monitor("inproc://router.monitor", zmq.EVENT_ACCEPTED)
+        self._router.setsockopt(zmq.LINGER, 0)
+        self._router.monitor(f"inproc://{self.identity}-.monitor", zmq.EVENT_ACCEPTED)
         mon_sock = self._ctx.socket(zmq.PAIR)
 
         if self._bind_address:
             self._router.bind(self._bind_address)
             logger.info(f'Response socket {self._router} created')
-            mon_sock.connect("inproc://router.monitor")
-
-        self._dealer = self._ctx.socket(zmq.ROUTER)
-        self._dealer.setsockopt(zmq.IDENTITY, self.identity.encode())
-        self._dealer.setsockopt(zmq.ROUTER_MANDATORY, 1)
-        logger.info(f'Request socket {self._dealer} created')
+            mon_sock.connect(f"inproc://{self.identity}-.monitor")
 
         poller = zmq.Poller()
         poller.register(self._router, zmq.POLLIN)
-        poller.register(self._dealer, zmq.POLLIN)
         poller.register(mon_sock, zmq.POLLIN)
 
         while self._running:
+
             events = dict(poller.poll(timeout=10))
 
             if events.get(mon_sock, None) == zmq.POLLIN:
@@ -671,27 +687,35 @@ class MKTLComs:
                 if evt['event'] == zmq.EVENT_ACCEPTED:
                     logger.info(f"New connection accepted from {evt}")
 
-            for sock in (self._router, self._dealer):
-                if sock in events and events[sock] == zmq.POLLIN:
-                    msg = sock.recv_multipart()
-                    logger.debug(f'Received multipart message on {sock}')
-                    m, sender_id, err = MKTLMessage.try_parse(self, msg, received_by=sock.identity)
-                    if err:
-                        logger.warning(f'Received malformed message from {sender_id}: {err}. Ignoring')
-                    elif m.is_reply():
-                        logger.debug(f'Received reply for request {m.req_id}')
-                        with self._client_lock:
-                            if m.req_id in self._pending_replies:
-                                self._pending_replies[m.req_id] = m
-                            else:
-                                logger.warning(f'Received reply for unknown request: {m.req_id}')
+            if events.get(self._router, None) == zmq.POLLIN:
+                msg = self._router.recv_multipart()
+                logger.debug(f'Received multipart message on {self._router}')
+                m, sender_id, err = MKTLMessage.try_parse(self, msg, received_by=self._router.identity)
+                if err:
+                    logger.warning(f'Received malformed message from {sender_id}: {err}. Ignoring')
+                else:
+                    assert m.is_request()
+                    logger.debug(f'Received message: {m}')
+                    try:
+                        m.respond(self._handle_message(m))
+                    except Exception as e:
+                        m.fail(e)
+                        logger.error(f'Exception while handling message: {e}', exc_info=True)
+
+            for sock in (s for s in self._connected_addresses.values() if events.get(s, None) == zmq.POLLIN):
+                msg = sock.recv_multipart()
+                logger.debug(f'Received multipart message on {sock}')
+                m, sender_id, err = MKTLMessage.try_parse(self, msg, received_by=sock.identity)
+                if err:
+                    logger.warning(f'Received malformed message from {sender_id}: {err}. Ignoring')
+                    continue
+                assert m.is_reply()
+                logger.debug(f'Received reply for request {m.req_id}')
+                with self._client_lock:
+                    if m.req_id in self._pending_replies:
+                        self._pending_replies[m.req_id] = m
                     else:
-                        logger.debug(f'Received message: {m}')
-                        try:
-                            m.respond(self._handle_message(m))
-                        except Exception as e:
-                            m.fail(e)
-                            logger.error(f'Exception while handling message: {e}', exc_info=True)
+                        logger.warning(f'Ignoring reply for unknown request: {m.req_id}')
 
             try:
                 while True:
@@ -701,15 +725,17 @@ class MKTLComs:
                         logger.debug(f'Sending with response router: {item}') #\n' + '   ,\n'.join(map(str, frames)))
                         self._router.send_multipart(frames)
                     else:
-                        self._connect_for_key(item.key)
-                        time.sleep(.5)
-                        logger.debug(f'Sending with request "dealer": {item}') #\n' + '   ,\n'.join(map(str, frames)))
-                        self._dealer.send_multipart(frames)
+                        if self._connect_for_key(item.key):
+                            poller.register(self._dealer[item.key], zmq.POLLIN)
+                        logger.debug(f'Sending request to {self._dealer[item.key]}: {item}') #\n' + '   ,\n'.join(map(str, frames)))
+                        self._dealer[item.key].send_multipart(frames)
             except queue.Empty:
                 pass
 
         self._router.close()
-        self._dealer.close()
+        for s in self._connected_addresses.values():
+            s.close()
+        self._dealer={}
 
     def _listen_loop(self):
         """
