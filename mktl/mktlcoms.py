@@ -646,6 +646,7 @@ class MKTLComs:
             new_connection = True
         elif key not in self._dealer:
             s = self._connected_addresses[address]
+            self._dealer[key] = s
             logger.info(f"Using socket {s} for key={key}")
         else:
             assert self._dealer[key] == self._connected_addresses[address]
