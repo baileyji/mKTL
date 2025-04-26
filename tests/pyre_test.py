@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 def handle_adc_enabled(msg):
     logging.info(f"Handler received message: {msg}")
-    return {"message": "Handled adc.enabled"}
+    logging.info(f"Hello World!")
 
 
 def start_receiver(node_name: str, group_name: str):
@@ -48,7 +48,7 @@ def start_sender(node_name: str, group_name: str, message_data: dict, key: str):
     time.sleep(3)
 
     try:
-        response = node.get(key, message_data, timeout=5)
+        response = node.get(key, message_data, timeout=20)
         logging.info(f"{node_name} received response: {response}")
     except Exception as e:
         logging.error(f"{node_name} failed to get response: {e}")

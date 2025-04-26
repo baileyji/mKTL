@@ -231,12 +231,6 @@ class MKTLMessage:
         """
         return self.msg_type in self.REQUEST_TYPES
 
-    def is_config(self):
-        """
-        Return True if the message type is in VALID_TYPES
-        """
-        return self.msg_type in self.VALID_TYPES
-
     def ack(self):
         """
         Send an immediate 'ack' response to the requester.
@@ -521,13 +515,13 @@ class MKTLComs:
         logger.debug(f"Creating MKTLMessage for request type={msg_type}, key={key}")
         m = MKTLMessage(
             coms=self,
-            sender_id=self.identity,
+            sender_id=self.identity.encode(),
             msg_type=msg_type,
             req_id=req_id,
             key=key,
             json_data=payload,
             binary_blob=binary_blob,
-            destination=destination.encode() if destination else b''
+            destination=destination if destination else b''
         )
         self._pending_replies[req_id]=None
         self._send_queue.put(m)
@@ -624,7 +618,7 @@ class MKTLComs:
 
     def _serve_loop(self):
         """
-        Main loop for handling Zyre-based messaging: WHISPER, SHOUT, and peer tracking.
+        Main loop for handling Zyre-based messaging: WHISPER and peer tracking.
         """
         logger = getLogger(__name__)
         logger.info(f"Zyre loop started. Listening in group '{self._group}'...")
@@ -648,26 +642,26 @@ class MKTLComs:
                         continue
 
                     event_type = frames[0].decode(errors='ignore')
-                    peer_id = frames[2].decode(errors='ignore')
+                    peer_uuid = frames[1]
+                    peer_name = frames[2].decode(errors='ignore')
                     payload = frames[2:]
 
-                    logger.debug(f"Received Zyre event: {event_type} from {peer_id}")
+                    logger.debug(f"Received Zyre event: {event_type} from {peer_name}")
 
                     if event_type == "WHISPER":
-                        m, sender_id, err = MKTLMessage.try_parse(self, payload, received_by=peer_id)
+                        m, sender_id, err = MKTLMessage.try_parse(self, payload, received_by=peer_name)
                         if err:
                             logger.warning(f"Malformed WHISPER from {sender_id}: {err}")
                             continue
-
-                        if m.is_config():
+                        if m.msg_type == 'config':
                             keys_data = m.json_data.get("keys", [])
 
                             # Check if keys_data is a list before processing
                             if isinstance(keys_data, list):
                                 for key in keys_data:
                                     # Add to the routing table
-                                    self._routing_table[key] = (peer_id, None)
-                                    logger.info(f"Discovered config key '{key}' from peer '{peer_id}'")
+                                    self._routing_table[key] = (peer_uuid, peer_name)
+                                    logger.info(f"Discovered config key '{key}' from peer '{peer_name}'")
                         if m.is_request():
                             logger.debug(f"Handling request: {m}")
                             try:
@@ -677,24 +671,25 @@ class MKTLComs:
                                 logger.error(f"Exception handling message: {e}", exc_info=True)
 
                     elif event_type == "ENTER":
-                        logger.info(f"Peer entered: {peer_id}")
+                        logger.info(f"Peer entered: {peer_name} with UUID: {peer_uuid.hex()}")
+                        self._routing_table[peer_name] = (peer_uuid, peer_name)
                         self.announce_keys()
 
                     elif event_type == "EXIT":
-                        logger.info(f"Peer exited: {peer_id}")
+                        logger.info(f"Peer exited: {peer_name}")
                         # Clean up routing table entries
                         self._routing_table = {
-                            k: v for k, v in self._routing_table.items() if v[1] != peer_id
+                            k: v for k, v in self._routing_table.items() if v[1] != peer_name
                         }
 
                     elif event_type == "JOIN":
-                        logger.info(f"Peer {peer_id} joined group")
+                        logger.info(f"Peer {peer_name} joined group")
 
                     elif event_type == "LEAVE":
-                        logger.info(f"Peer {peer_id} left group")
+                        logger.info(f"Peer {peer_name} left group")
 
                     elif event_type == "STOP":
-                        logger.info(f"Peer {peer_id} stopped")
+                        logger.info(f"Peer {peer_name} stopped")
 
                     else:
                         logger.debug(f"Unhandled Zyre event: {event_type}")
@@ -704,13 +699,34 @@ class MKTLComs:
             try:
                 while True:
                     item = self._send_queue.get_nowait()
+                    dest = item.destination
                     frames = item.to_frames()
+
+                    # TODO: This is a workaround lol
+                    if len(dest) == 16:
+                        # Raw UUID bytes
+                        destination_uuid = uuid.UUID(bytes=dest)
+                    else:
+                        # Peer name encoded as bytes — decode and look up
+                        try:
+                            peer_name = dest.decode()
+                        except UnicodeDecodeError:
+                            logger.error(f"Failed to decode peer name from destination: {dest}")
+                            continue
+
+                        if peer_name not in self._routing_table:
+                            logger.error(f"No routing info for peer name: {peer_name}")
+                            continue
+
+                        peer_uuid_bytes, _ = self._routing_table[peer_name]
+                        destination_uuid = uuid.UUID(bytes=peer_uuid_bytes)
+
                     if item.is_reply():
                         logger.debug(f'Sending with response (whisper): {item}') #\n' + '   ,\n'.join(map(str, frames)))
-                        self._zyre_peer.whisper(item.destination.decode(), frames)
+                        self._zyre_peer.whisper(destination_uuid, frames)
                     else:
                         logger.debug(f'Sending request to specific peer via whisper {item.destination}: {item}') #\n' + '   ,\n'.join(map(str, frames)))
-                        self._zyre_peer.whisper(item.destination.decode(), frames)
+                        self._zyre_peer.whisper(destination_uuid, frames)
             except queue.Empty:
                 pass
 
