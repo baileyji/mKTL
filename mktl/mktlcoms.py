@@ -512,7 +512,6 @@ class MKTLComs:
 
         Handles request framing, timeout logic, and error propagation.
         """
-        #TODO: Need to make updates to send to a peer via Zyre
         logger = getLogger(__name__)
         if not self._running:
             logger.error("Cannot send request because MKTLComs is not started.")
@@ -649,7 +648,7 @@ class MKTLComs:
                         continue
 
                     event_type = frames[0].decode(errors='ignore')
-                    peer_id = frames[1].decode(errors='ignore')
+                    peer_id = frames[2].decode(errors='ignore')
                     payload = frames[2:]
 
                     logger.debug(f"Received Zyre event: {event_type} from {peer_id}")
@@ -702,6 +701,18 @@ class MKTLComs:
 
                 except Exception as e:
                     logger.error(f"Exception in serve loop: {e}", exc_info=True)
+            try:
+                while True:
+                    item = self._send_queue.get_nowait()
+                    frames = item.to_frames()
+                    if item.is_reply():
+                        logger.debug(f'Sending with response (whisper): {item}') #\n' + '   ,\n'.join(map(str, frames)))
+                        self._zyre_peer.whisper(item.destination.decode(), frames)
+                    else:
+                        logger.debug(f'Sending request to specific peer via whisper {item.destination}: {item}') #\n' + '   ,\n'.join(map(str, frames)))
+                        self._zyre_peer.whisper(item.destination.decode(), frames)
+            except queue.Empty:
+                pass
 
     def _listen_loop(self):
         """
