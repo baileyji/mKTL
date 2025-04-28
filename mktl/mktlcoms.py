@@ -280,27 +280,27 @@ class MKTLMessage:
                 logger.debug(f"Already responded for {self}")
 
     @classmethod
-    def build_config(cls, identity: str, req_id: bytes, keys: tuple) -> "MKTLMessage":
+    def build_config(cls, coms: "MKTLComs", req_id: bytes, keys: tuple) -> "MKTLMessage":
         """
         Build a config message to announce keys via a WHISPER.
 
         Args:
-            identity: Identity of the sender (usually `self.identity`).
+            coms: An instance of MKTLComs (provides identity, context, etc.).
             req_id: Unique request ID (e.g., `uuid.uuid4().bytes`).
             keys: A tuple of keys to be announced.
 
         Returns:
             An MKTLMessage instance configured for the config message.
         """
-        # Create a config message
         return cls(
-            sender_id=identity.encode(),
+            coms=coms,
+            sender_id=coms.identity,
             msg_type='config',
             req_id=req_id,
-            key='registry.announce',
+            key='announce',
             json_data={"keys": list(keys)},
             binary_blob=None,
-            destination=b''
+            destination=b''  # Not used in WHISPER
         )
 
 
@@ -393,18 +393,19 @@ class MKTLComs:
         """
         logger = getLogger(__name__)
         logger.debug("Constructing MKTLComs instance...")
+
+        # Init Zyre
+        self._zyre_peer = Pyre(identity)
+        logger.debug(f"Initialized Zyre peer with identity={identity}")
+
         # Identity and Zyre group
-        self.identity = identity or f'mktl-{uuid.uuid4().hex[:8]}'
+        self.identity = self._zyre_peer.uuid()
         self._group = group
         self.authoritative_keys = {}
 
         self._ctx = zmq.Context.instance()
         self._running = False
         self._threads = []
-
-        # Init Zyre
-        self._zyre_peer = Pyre(self.identity)
-        logger.debug(f"Initialized Zyre peer with identity={self.identity}")
 
         self._bind_address = None
         self._send_queue = queue.Queue()
@@ -535,7 +536,7 @@ class MKTLComs:
         logger.debug(f"Creating MKTLMessage for request type={msg_type}, key={key}")
         m = MKTLMessage(
             coms=self,
-            sender_id=self.identity.encode(),
+            sender_id=self.identity,
             msg_type=msg_type,
             req_id=req_id,
             key=key,
@@ -683,34 +684,8 @@ class MKTLComs:
             try:
                 while True:
                     item = self._send_queue.get_nowait()
-                    dest = item.destination
-                    frames = item.to_frames()
-
-                    # TODO: This is a workaround lol
-                    if len(dest) == 16:
-                        # Raw UUID bytes
-                        destination_uuid = uuid.UUID(bytes=dest)
-                    else:
-                        # Peer name encoded as bytes — decode and look up
-                        try:
-                            peer_name = dest.decode()
-                        except UnicodeDecodeError:
-                            logger.error(f"Failed to decode peer name from destination: {dest}")
-                            continue
-
-                        if peer_name not in self._routing_table:
-                            logger.error(f"No routing info for peer name: {peer_name}")
-                            continue
-
-                        peer_uuid_bytes = self._routing_table[peer_name]
-                        destination_uuid = uuid.UUID(bytes=peer_uuid_bytes)
-
-                    if item.is_reply():
-                        logger.debug(f'Sending with response (whisper): {item}') #\n' + '   ,\n'.join(map(str, frames)))
-                        self._zyre_peer.whisper(destination_uuid, frames)
-                    else:
-                        logger.debug(f'Sending request to specific peer via whisper {item.destination}: {item}') #\n' + '   ,\n'.join(map(str, frames)))
-                        self._zyre_peer.whisper(destination_uuid, frames)
+                    self._zyre_peer.whisper(uuid.UUID(bytes=self._routing_table[item.key]), item.to_frames())
+                    logger.debug(f'Sending  {item} to peer {self._routing_table[item.key]}')
             except queue.Empty:
                 pass
 
@@ -844,11 +819,17 @@ class MKTLComs:
             getLogger(__name__).warning("Zyre peer not initialized. Cannot announce keys.")
             return
 
+        msg = MKTLMessage.build_config(
+            coms=self,
+            req_id=uuid.uuid4().bytes,
+            keys=tuple(self.authoritative_keys.keys())
+        )
+        frames = msg.to_frames()
+
         # Get all peers in the group
         # TODO: Filter based on prefix if provided
         for peer in self._zyre_peer.peers():
-            self._zyre_peer.whisper(peer, MKTLMessage.build_config(identity=self.identity, req_id=uuid.uuid4().bytes,
-                                                              keys=tuple(self.authoritative_keys.keys())).to_frames())
+            self._zyre_peer.whisper(peer, frames)
 
         getLogger(__name__).info(f"Whispered keys: {list(self.authoritative_keys.keys())}")
 
