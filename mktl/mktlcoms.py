@@ -299,8 +299,7 @@ class MKTLMessage:
             req_id=req_id,
             key='announce',
             json_data={"keys": list(keys)},
-            binary_blob=None,
-            destination=b''  # Not used in WHISPER
+            binary_blob=None
         )
 
 
@@ -667,7 +666,7 @@ class MKTLComs:
                     elif event_type == "ENTER":
                         logger.info(f"Peer entered: {peer_name} with UUID: {peer_id.hex()}")
                         self._routing_table[peer_name] = peer_id
-                        self.announce_keys()
+                        self.announce_keys(peer=peer_id)
 
                     elif event_type == "EXIT":
                         logger.info(f"Peer exited: {peer_name}")
@@ -684,8 +683,14 @@ class MKTLComs:
             try:
                 while True:
                     item = self._send_queue.get_nowait()
-                    self._zyre_peer.whisper(uuid.UUID(bytes=self._routing_table[item.key]), item.to_frames())
-                    logger.debug(f'Sending  {item} to peer {self._routing_table[item.key]}')
+                    if item.is_reply():
+                        dest = item.destination.decode()
+                        self._zyre_peer.whisper(uuid.UUID(bytes=self._routing_table[dest]), item.to_frames())
+                        logger.debug(f'Sending  {item} to peer {self._routing_table[dest]}')
+                    else:
+                        self._zyre_peer.whisper(uuid.UUID(bytes=self._routing_table[item.key]), item.to_frames())
+                        logger.debug(f'Sending  {item} to peer {self._routing_table[item.key]}')
+
             except queue.Empty:
                 pass
 
@@ -811,9 +816,12 @@ class MKTLComs:
         getLogger(__name__).info(f"Connecting SUB socket to {address}")
         self._sub_address = address
 
-    def announce_keys(self):
+    def announce_keys(self, peer: Optional[bytes] = None):
         """
-        Announce this node's authoritative keys to other peers via a WHISPER.
+        Announce this node's authoritative keys via WHISPER.
+
+        Args:
+            peer: Optional single peer UUID to send to. If None, send to all.
         """
         if not self._zyre_peer:
             getLogger(__name__).warning("Zyre peer not initialized. Cannot announce keys.")
@@ -826,12 +834,11 @@ class MKTLComs:
         )
         frames = msg.to_frames()
 
-        # Get all peers in the group
-        # TODO: Filter based on prefix if provided
-        for peer in self._zyre_peer.peers():
-            self._zyre_peer.whisper(peer, frames)
+        peers = [peer] if peer else self._zyre_peer.peers()
+        for p in peers:
+            self._zyre_peer.whisper(uuid.UUID(bytes=p), frames)
 
-        getLogger(__name__).info(f"Whispered keys: {list(self.authoritative_keys.keys())}")
+        getLogger(__name__).info(f"Whispered keys to {len(peers)} peer(s): {list(self.authoritative_keys.keys())}")
 
     def register_key_handler(self, key: str, handler: Callable):
         """
