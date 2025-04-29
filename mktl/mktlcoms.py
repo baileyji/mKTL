@@ -15,6 +15,7 @@ Typical usage:
 
     val, blob = coms.get("another.service.key")
 """
+import logging
 from logging import getLogger
 import itertools
 import zmq
@@ -25,10 +26,11 @@ import json
 import queue
 import time
 from typing import Callable, Dict, Optional, Any, List, Tuple, Union, Set
+from pyre import Pyre
 
 
 class MKTLMessage:
-    VALID_TYPES = {'get', 'set', 'ack', 'response', 'error', 'publish'}
+    VALID_TYPES = {'get', 'set', 'ack', 'response', 'config', 'error', 'publish'}
     REPLY_TYPES = {'ack', 'response', 'error'}
     REQUEST_TYPES = {'get', 'set'}
 
@@ -192,28 +194,18 @@ class MKTLMessage:
         # Router to dealer: router requires destination id and will strip it
         # Dealer to router: router will prepend sender id
 
-        if self.is_request():  #request out over a dealer
-            frames = [
-                # self.destination,
-                # b'',
-                # self.sender_id,
-                b'',
-                self.msg_type.encode(),
-                self.req_id,
-                self.key.encode(),
-                json.dumps(self.json_data).encode()
-            ]
-        else:  #response out over a router
-            frames = [
-                self.destination,
-                b'',
-                self.sender_id,
-                b'',
-                self.msg_type.encode(),
-                self.req_id,
-                self.key.encode(),
-                json.dumps(self.json_data).encode()
-            ]
+        sender_id_bytes = self.sender_id.bytes if isinstance(self.sender_id, uuid.UUID) else self.sender_id
+
+        frames = [
+            b'',
+            sender_id_bytes,
+            b'',
+            self.msg_type.encode(),
+            self.req_id,
+            self.key.encode(),
+            json.dumps(self.json_data).encode()
+        ]
+
         if self.binary_blob:
             frames.append(self.binary_blob)
         return frames
@@ -281,6 +273,28 @@ class MKTLMessage:
             else:
                 logger.debug(f"Already responded for {self}")
 
+    @classmethod
+    def build_config(cls, coms: "MKTLComs", req_id: bytes, keys: tuple) -> "MKTLMessage":
+        """
+        Build a config message to announce keys via a WHISPER.
+
+        Args:
+            coms: An instance of MKTLComs (provides identity, context, etc.).
+            req_id: Unique request ID (e.g., `uuid.uuid4().bytes`).
+            keys: A tuple of keys to be announced.
+
+        Returns:
+            An MKTLMessage instance configured for the config message.
+        """
+        return cls(
+            coms=coms,
+            sender_id=coms.identity,
+            msg_type='config',
+            req_id=req_id,
+            key='announce',
+            json_data={"keys": list(keys)},
+            binary_blob=None
+        )
 
 
 class MKTLSubscription:
@@ -356,8 +370,8 @@ class MKTLComs:
     """
 
     def __init__(self, identity: Optional[str] = None, authoritative_keys: Optional[Dict[str, Callable]] = None,
-                 registry_addr: Optional[str] = None, shutdown_callback: Optional[Callable] = None,
-                 bind_addr: Optional[str] = None, pub_address: Optional[int] = None, start=False):
+                 shutdown_callback: Optional[Callable] = None, bind_addr: Optional[str] = None,
+                 pub_address: Optional[int] = None, group: Optional[str] = "MKTLGROUP", start=False):
         """
         Initialize a new mKTL communications object.
 
@@ -372,9 +386,15 @@ class MKTLComs:
         """
         logger = getLogger(__name__)
         logger.debug("Constructing MKTLComs instance...")
-        self.identity = identity or f'mktl-{uuid.uuid4().hex[:8]}'
+
+        # Init Zyre
+        self._zyre_peer = Pyre(identity)
+        logger.debug(f"Initialized Zyre peer with identity={identity}")
+
+        # Identity and Zyre group
+        self.identity = self._zyre_peer.uuid()
+        self.group = group
         self.authoritative_keys = {}
-        self.registry_addr = registry_addr
 
         self._ctx = zmq.Context.instance()
         self._running = False
@@ -390,8 +410,6 @@ class MKTLComs:
         if bind_addr is not None:
             self.bind(bind_addr, set_pub=pub_address is None)
 
-        self._router = None
-        self._dealer: Dict[str, zmq.Socket] = {}
         self._sub_socket = None
         self._sub_address = None
 
@@ -403,13 +421,7 @@ class MKTLComs:
 
         self._sub_callbacks: Dict[str, List[Callable]] = {}
         self._sub_listeners: Dict[str, List[MKTLSubscription]] = {}
-
-        self._routing_table: Dict[str, Tuple[str, str]] = {}  # key -> (identity, address)
-        if registry_addr:
-            self._routing_table['registry.owner'] = ('registry', registry_addr)
-            self._routing_table['registry.config'] = ('registry', registry_addr)
-
-        self._connected_addresses: dict[str, zmq.Socket] = {}
+        self._routing_table: Dict[str, str] = {}  # key -> identity
 
         self._shutdown_callback = shutdown_callback
 
@@ -418,13 +430,13 @@ class MKTLComs:
                 self.register_key_handler(k, h)
         self._register_internal_handlers()
 
-        logger.info(f"MKTLComs created with identity={self.identity}, registry_addr={self.registry_addr}")
+        logger.info(f"MKTLComs created with identity={self.identity}")
 
         if start:
             self.start()
 
     def __repr__(self):
-        return f'MKTLComs(identity={self.identity}, registry_addr={self.registry_addr})'
+        return f'MKTLComs(identity={self.identity})'
 
     def _register_internal_handlers(self):
         """
@@ -451,58 +463,6 @@ class MKTLComs:
             logger.warning("Shutdown command received via mktl_control.")
             self._shutdown_callback()
 
-    def _send_registry_config(self):
-        """
-        Announce this node's authoritative keys to the registry service.
-
-        Encodes the identity, address, and known keys into a StoreConfig payload
-        and sends it as a `set` to `registry.config`.
-        """
-        logger = getLogger(__name__)
-        keys = list(self.authoritative_keys.keys())
-        user_keys = list(keys)
-        user_keys.remove(f'{self.identity}.mktl_control')
-        if not user_keys:
-            logger.debug("No authoritative keys to announce (besides mktl_control), will not register.")
-            return
-        logger.debug("Attempting to send registry config...")
-
-        payload = {'identity': self.identity,
-                   'address': self._bind_address,
-                   'keys': keys,
-                   }
-
-        self.set('registry.config', payload)
-
-    def _query_registry_owner(self, key: str) -> Optional[Tuple[str, str]]:
-        """
-        Query the registry for the owner of a specific key.
-
-        Sends a `get` request to `registry.owner` and expects a response
-        with `identity` and `address`.
-
-        Args:
-            key: The key to resolve.
-
-        Returns:
-            Tuple of (identity, address), or raises on failure.
-        """
-        logger = getLogger(__name__)
-        if not self.registry_addr:
-            logger.warning('Registry address not configured.')
-            return None
-
-        result = self.get('registry.owner', {'key': key})
-        identity = result.json_data.get('identity')
-        address = result.json_data.get('address')
-        if identity and address:
-            self._routing_table[key] = (identity, address)
-            logger.info(f"Registry resolution for {key}: identity={identity}, address={address}")
-            return identity, address
-        else:
-            logger.warning(f"Could not resolve owner for key={key}")
-            return None
-
     def _resolve_destination(self, key: str, destination: Optional[str]) -> str:
         """
         Determine the correct identity to route a request to.
@@ -521,13 +481,20 @@ class MKTLComs:
             logger.debug(f"Destination override provided for key={key}: {destination}")
             return destination
 
-        identity, address = self._routing_table.get(key, (None, None))
-        if identity is None:
-            logger.debug(f"No local routing info for key={key}; querying registry.")
-            resolved = self._query_registry_owner(key)
-            if not resolved:
-                raise RuntimeError(f'Could not resolve destination for key: {key}')
-            identity, _ = resolved
+        logger.debug(f"Current routing table: {self._routing_table}")
+        identity = self._routing_table.get(key)
+        if identity is not None:
+            logger.debug(f"Resolved destination for key={key}: {identity}")
+        else:
+            logger.warning(f"No destination found in routing table for key={key}. Checking registry...")
+
+        # TODO: If we don't have the key mapped, we can ask for the current daemons to whisper and check again
+        # if identity is None:
+        #     logger.debug(f"No local routing info for key={key}; querying registry.")
+        #     resolved = self._query_registry_owner(key)
+        #     if not resolved:
+        #         raise RuntimeError(f'Could not resolve destination for key: {key}')
+        #     identity, _ = resolved
         return identity
 
     def _load_keys_for_prefix(self, prefix: str):
@@ -560,15 +527,15 @@ class MKTLComs:
         logger.debug(f"Creating MKTLMessage for request type={msg_type}, key={key}")
         m = MKTLMessage(
             coms=self,
-            sender_id=self.identity.encode(),
+            sender_id=self.identity,
             msg_type=msg_type,
             req_id=req_id,
             key=key,
             json_data=payload,
             binary_blob=binary_blob,
-            destination=destination.encode() if destination else b''
+            destination=destination if destination else b''
         )
-        self._pending_replies[req_id]=None
+        self._pending_replies[req_id] = None
         self._send_queue.put(m)
 
         start_time = time.time()
@@ -579,7 +546,7 @@ class MKTLComs:
                     msg_obj = self._pending_replies.pop(req_id)
                     if msg_obj.msg_type == 'ack':
                         logger.info(f"ACK reply for request {req_id}")
-                        self._pending_replies[req_id]=None
+                        self._pending_replies[req_id] = None
                         continue
                     elif msg_obj.msg_type == 'error':
                         logger.info(f"ERROR reply for request {req_id}: {msg_obj.json_data}")
@@ -618,124 +585,109 @@ class MKTLComs:
             m.fail('Unknown key')
             logger.warning(f'Sent error response for key: {m.key}')
 
-    def _connect_for_key(self, key: str):
+    def _register_discovered_keys(self, peer_id: str, data: dict):
         """
-        Connects or reuses a DEALER socket for the provided key. If the socket for the
-        key's address is not yet established, the method creates and connects a new
-        socket. If the socket for the address exists but is not yet tied to the key,
-        it associates the existing socket with the key. If the socket already exists
-        for the key, it ensures the consistency of the connection.
-
-        Args:
-            key (str): The routing key for which the socket connection is established.
-
-        Returns:
-            bool: True iff a new connection was made.
+        Register keys discovered in a config message's data field.
         """
         logger = getLogger(__name__)
-        identity, address = self._routing_table[key]
-        new_connection = False
-        if address not in self._connected_addresses:
-            s = self._ctx.socket(zmq.DEALER)
-            s.setsockopt(zmq.IDENTITY, self.identity.encode())
-            s.setsockopt(zmq.LINGER, 0)
-            s.connect(address)
-            self._dealer[key] = s
-            self._connected_addresses[address] = s
-            logger.info(f"Request socket {s} connected to {address} for key={key}")
-            new_connection = True
-        elif key not in self._dealer:
-            s = self._connected_addresses[address]
-            logger.info(f"Using socket {s} for key={key}")
-        else:
-            assert self._dealer[key] == self._connected_addresses[address]
-
-        return new_connection
+        for key in data.keys():
+            self._routing_table[key] = peer_id
+            logger.info(f"Discovered config key '{key}' from peer '{peer_id}'")
 
     def _serve_loop(self):
         """
-        Main server thread loop for receiving ROUTER messages.
-
-        Handles control-plane traffic: requests, responses, and registry lookups.
+        Main loop for handling Zyre-based messaging: WHISPER and peer tracking.
         """
         logger = getLogger(__name__)
-        logger.debug(f'Starting server loop for {self.identity} at {self._bind_address}')
-        self._router = self._ctx.socket(zmq.ROUTER)
-        self._router.setsockopt(zmq.IDENTITY, self.identity.encode())
-        self._router.setsockopt(zmq.ROUTER_MANDATORY, 1)
-        self._router.setsockopt(zmq.LINGER, 0)
-        self._router.monitor(f"inproc://{self.identity}-.monitor", zmq.EVENT_ACCEPTED)
-        mon_sock = self._ctx.socket(zmq.PAIR)
+        logger.info(f"Zyre loop started. Listening in group '{self.group}'...")
 
-        if self._bind_address:
-            self._router.bind(self._bind_address)
-            logger.info(f'Response socket {self._router} created')
-            mon_sock.connect(f"inproc://{self.identity}-.monitor")
+        # Start Zyre peer and join group
+        self._zyre_peer.join(self.group)
+        self._zyre_peer.start()
+        self._zyre_peer.shout(self.group, MKTLMessage.build_config(coms=self, req_id=uuid.uuid4().bytes,
+                                                                   keys=tuple(self.authoritative_keys.keys())).to_frames())
 
+        # Poll Zyre socket
         poller = zmq.Poller()
-        poller.register(self._router, zmq.POLLIN)
-        poller.register(mon_sock, zmq.POLLIN)
+        zyre_sock = self._zyre_peer.socket()
+        poller.register(zyre_sock, zmq.POLLIN)
 
         while self._running:
-
             events = dict(poller.poll(timeout=10))
 
-            if events.get(mon_sock, None) == zmq.POLLIN:
-                raw = mon_sock.recv_multipart()
-                # Convert raw monitor event frames into a python dict
-                evt = parse_monitor_message(raw)
-                if evt['event'] == zmq.EVENT_ACCEPTED:
-                    logger.info(f"New connection accepted from {evt}")
+            if events.get(zyre_sock) == zmq.POLLIN:
+                try:
+                    frames = self._zyre_peer.recv()
+                    if not frames or len(frames) < 2:
+                        continue
 
-            if events.get(self._router, None) == zmq.POLLIN:
-                msg = self._router.recv_multipart()
-                logger.debug(f'Received multipart message on {self._router}')
-                m, sender_id, err = MKTLMessage.try_parse(self, msg, received_by=self._router.identity)
-                if err:
-                    logger.warning(f'Received malformed message from {sender_id}: {err}. Ignoring')
-                else:
-                    assert m.is_request()
-                    logger.debug(f'Received message: {m}')
-                    try:
-                        m.respond(self._handle_message(m))
-                    except Exception as e:
-                        m.fail(e)
-                        logger.error(f'Exception while handling message: {e}', exc_info=True)
+                    event_type = frames[0].decode(errors='ignore')
+                    peer_id = frames[1]
+                    peer_name = frames[2].decode(errors='ignore')
+                    payload = frames[3:]
 
-            for sock in (s for s in self._connected_addresses.values() if events.get(s, None) == zmq.POLLIN):
-                msg = sock.recv_multipart()
-                logger.debug(f'Received multipart message on {sock}')
-                m, sender_id, err = MKTLMessage.try_parse(self, msg, received_by=sock.identity)
-                if err:
-                    logger.warning(f'Received malformed message from {sender_id}: {err}. Ignoring')
-                    continue
-                assert m.is_reply()
-                logger.debug(f'Received reply for request {m.req_id}')
-                with self._client_lock:
-                    if m.req_id in self._pending_replies:
-                        self._pending_replies[m.req_id] = m
+                    logger.debug(f"Received Zyre event: {event_type} from {peer_name}")
+
+                    if event_type == "WHISPER":
+                        m, sender_id, err = MKTLMessage.try_parse(self, payload, received_by=peer_id)
+                        if err:
+                            logger.warning(f"Malformed WHISPER from {sender_id}: {err}")
+                            continue
+                        if m.msg_type == 'config':
+                            keys_data = m.json_data.get("keys", [])
+
+                            # Check if keys_data is a list before processing
+                            if isinstance(keys_data, list):
+                                for key in keys_data:
+                                    # Add to the routing table
+                                    self._routing_table[key] = peer_id
+                                    logger.info(f"Discovered config key '{key}' from peer '{peer_name}'")
+                        if m.is_request():
+                            logger.debug(f"Handling request: {m}")
+                            try:
+                                m.respond(self._handle_message(m))
+                            except Exception as e:
+                                m.fail(e)
+                                logger.error(f"Exception handling message: {e}", exc_info=True)
+                        elif m.is_reply():
+                            logger.debug(f'Received reply for request {m.req_id}')
+                            with self._client_lock:
+                                if m.req_id in self._pending_replies:
+                                    self._pending_replies[m.req_id] = m
+                                else:
+                                    logger.warning(f'Ignoring reply for unknown request: {m.req_id}')
+
+                    elif event_type == "ENTER":
+                        logger.info(f"Peer entered: {peer_name} with UUID: {peer_id.hex()}")
+                        self._zyre_peer.whisper(uuid.UUID(bytes=peer_id),
+                                                MKTLMessage.build_config(coms=self, req_id=uuid.uuid4().bytes,
+                                                                         keys=tuple(self.authoritative_keys.keys())).to_frames())
+                        logger.debug(f"Whispered keys to {peer_name}: {list(self.authoritative_keys.keys())}")
+
+                    elif event_type == "EXIT":
+                        logger.info(f"Peer exited: {peer_name}")
+                        # Clean up routing table entries
+                        self._routing_table = {
+                            k: v for k, v in self._routing_table.items() if v[1] != peer_name
+                        }
+
                     else:
-                        logger.warning(f'Ignoring reply for unknown request: {m.req_id}')
+                        logger.debug(f"Unhandled Zyre event: {event_type}")
 
+                except Exception as e:
+                    logger.error(f"Exception in serve loop: {e}", exc_info=True)
             try:
                 while True:
                     item = self._send_queue.get_nowait()
-                    frames = item.to_frames()
                     if item.is_reply():
-                        logger.debug(f'Sending with response router: {item}') #\n' + '   ,\n'.join(map(str, frames)))
-                        self._router.send_multipart(frames)
+                        self._zyre_peer.whisper(uuid.UUID(bytes=item.destination), item.to_frames())
+                        logger.debug(f'Sending {item} to peer {item.destination.hex()}')
                     else:
-                        if self._connect_for_key(item.key):
-                            poller.register(self._dealer[item.key], zmq.POLLIN)
-                        logger.debug(f'Sending request to {self._dealer[item.key]}: {item}') #\n' + '   ,\n'.join(map(str, frames)))
-                        self._dealer[item.key].send_multipart(frames)
+                        self._zyre_peer.whisper(uuid.UUID(bytes=self._routing_table[item.key]), item.to_frames())
+                        logger.debug(f'Sending {item} to peer {self._routing_table[item.key]}')
+
             except queue.Empty:
                 pass
-
-        self._router.close()
-        for s in self._connected_addresses.values():
-            s.close()
-        self._dealer={}
 
     def _listen_loop(self):
         """
@@ -923,9 +875,6 @@ class MKTLComs:
             t_sub.start()
             self._threads.append(t_sub)
 
-        if self.registry_addr:
-            self._send_registry_config()
-
     def stop(self):
         """
         Cleanly shut down all communication threads and close sockets.
@@ -937,7 +886,7 @@ class MKTLComs:
             t.join()
         logger.debug("All communication threads joined.")
 
-    def get(self, key: str, payload: Any=None, timeout: float = 2.0, destination: Optional[str] = None) -> MKTLMessage:
+    def get(self, key: str, payload: Any = None, timeout: float = 2.0, destination: Optional[str] = None) -> MKTLMessage:
         """
         Send a `get` request to another node and wait for its response.
 
