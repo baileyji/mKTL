@@ -25,9 +25,6 @@ def start_receiver(node_name: str, group_name: str):
         start=True
     )
 
-    # Announce the keys so the sender knows who owns what
-    node.announce_keys()
-
     logging.info(f"{node_name} listening for messages...")
     time.sleep(10)  # Keep the receiver running for a bit
 

@@ -28,6 +28,7 @@ import time
 from typing import Callable, Dict, Optional, Any, List, Tuple, Union, Set
 from pyre import Pyre
 
+
 class MKTLMessage:
     VALID_TYPES = {'get', 'set', 'ack', 'response', 'config', 'error', 'publish'}
     REPLY_TYPES = {'ack', 'response', 'error'}
@@ -193,25 +194,18 @@ class MKTLMessage:
         # Router to dealer: router requires destination id and will strip it
         # Dealer to router: router will prepend sender id
 
-        if self.is_request():  #request out over a dealer
-            frames = [
-                # self.destination,
-                # b'',
-                # self.sender_id,
-                b'',
-                self.msg_type.encode(),
-                self.req_id,
-                self.key.encode(),
-                json.dumps(self.json_data).encode()
-            ]
-        else:  #response out over a router
-            frames = [
-                b'',
-                self.msg_type.encode(),
-                self.req_id,
-                self.key.encode(),
-                json.dumps(self.json_data).encode()
-            ]
+        sender_id_bytes = self.sender_id.bytes if isinstance(self.sender_id, uuid.UUID) else self.sender_id
+
+        frames = [
+            b'',
+            sender_id_bytes,
+            b'',
+            self.msg_type.encode(),
+            self.req_id,
+            self.key.encode(),
+            json.dumps(self.json_data).encode()
+        ]
+
         if self.binary_blob:
             frames.append(self.binary_blob)
         return frames
@@ -399,7 +393,7 @@ class MKTLComs:
 
         # Identity and Zyre group
         self.identity = self._zyre_peer.uuid()
-        self._group = group
+        self.group = group
         self.authoritative_keys = {}
 
         self._ctx = zmq.Context.instance()
@@ -427,9 +421,7 @@ class MKTLComs:
 
         self._sub_callbacks: Dict[str, List[Callable]] = {}
         self._sub_listeners: Dict[str, List[MKTLSubscription]] = {}
-        self._routing_table: Dict[str, str] = {}  # key -> (identity, address)
-
-        self._connected_addresses: dict[str, zmq.Socket] = {}
+        self._routing_table: Dict[str, str] = {}  # key -> identity
 
         self._shutdown_callback = shutdown_callback
 
@@ -543,7 +535,7 @@ class MKTLComs:
             binary_blob=binary_blob,
             destination=destination if destination else b''
         )
-        self._pending_replies[req_id]=None
+        self._pending_replies[req_id] = None
         self._send_queue.put(m)
 
         start_time = time.time()
@@ -554,7 +546,7 @@ class MKTLComs:
                     msg_obj = self._pending_replies.pop(req_id)
                     if msg_obj.msg_type == 'ack':
                         logger.info(f"ACK reply for request {req_id}")
-                        self._pending_replies[req_id]=None
+                        self._pending_replies[req_id] = None
                         continue
                     elif msg_obj.msg_type == 'error':
                         logger.info(f"ERROR reply for request {req_id}: {msg_obj.json_data}")
@@ -607,11 +599,13 @@ class MKTLComs:
         Main loop for handling Zyre-based messaging: WHISPER and peer tracking.
         """
         logger = getLogger(__name__)
-        logger.info(f"Zyre loop started. Listening in group '{self._group}'...")
+        logger.info(f"Zyre loop started. Listening in group '{self.group}'...")
 
         # Start Zyre peer and join group
-        self._zyre_peer.join(self._group)
+        self._zyre_peer.join(self.group)
         self._zyre_peer.start()
+        self._zyre_peer.shout(self.group, MKTLMessage.build_config(coms=self, req_id=uuid.uuid4().bytes,
+                                                                   keys=tuple(self.authoritative_keys.keys())).to_frames())
 
         # Poll Zyre socket
         poller = zmq.Poller()
@@ -630,12 +624,12 @@ class MKTLComs:
                     event_type = frames[0].decode(errors='ignore')
                     peer_id = frames[1]
                     peer_name = frames[2].decode(errors='ignore')
-                    payload = frames[2:]
+                    payload = frames[3:]
 
                     logger.debug(f"Received Zyre event: {event_type} from {peer_name}")
 
                     if event_type == "WHISPER":
-                        m, sender_id, err = MKTLMessage.try_parse(self, payload, received_by=peer_name)
+                        m, sender_id, err = MKTLMessage.try_parse(self, payload, received_by=peer_id)
                         if err:
                             logger.warning(f"Malformed WHISPER from {sender_id}: {err}")
                             continue
@@ -665,8 +659,10 @@ class MKTLComs:
 
                     elif event_type == "ENTER":
                         logger.info(f"Peer entered: {peer_name} with UUID: {peer_id.hex()}")
-                        self._routing_table[peer_name] = peer_id
-                        self.announce_keys(peer=peer_id)
+                        self._zyre_peer.whisper(uuid.UUID(bytes=peer_id),
+                                                MKTLMessage.build_config(coms=self, req_id=uuid.uuid4().bytes,
+                                                                         keys=tuple(self.authoritative_keys.keys())).to_frames())
+                        logger.debug(f"Whispered keys to {peer_name}: {list(self.authoritative_keys.keys())}")
 
                     elif event_type == "EXIT":
                         logger.info(f"Peer exited: {peer_name}")
@@ -684,12 +680,11 @@ class MKTLComs:
                 while True:
                     item = self._send_queue.get_nowait()
                     if item.is_reply():
-                        dest = item.destination.decode()
-                        self._zyre_peer.whisper(uuid.UUID(bytes=self._routing_table[dest]), item.to_frames())
-                        logger.debug(f'Sending  {item} to peer {self._routing_table[dest]}')
+                        self._zyre_peer.whisper(uuid.UUID(bytes=item.destination), item.to_frames())
+                        logger.debug(f'Sending {item} to peer {item.destination.hex()}')
                     else:
                         self._zyre_peer.whisper(uuid.UUID(bytes=self._routing_table[item.key]), item.to_frames())
-                        logger.debug(f'Sending  {item} to peer {self._routing_table[item.key]}')
+                        logger.debug(f'Sending {item} to peer {self._routing_table[item.key]}')
 
             except queue.Empty:
                 pass
@@ -816,30 +811,6 @@ class MKTLComs:
         getLogger(__name__).info(f"Connecting SUB socket to {address}")
         self._sub_address = address
 
-    def announce_keys(self, peer: Optional[bytes] = None):
-        """
-        Announce this node's authoritative keys via WHISPER.
-
-        Args:
-            peer: Optional single peer UUID to send to. If None, send to all.
-        """
-        if not self._zyre_peer:
-            getLogger(__name__).warning("Zyre peer not initialized. Cannot announce keys.")
-            return
-
-        msg = MKTLMessage.build_config(
-            coms=self,
-            req_id=uuid.uuid4().bytes,
-            keys=tuple(self.authoritative_keys.keys())
-        )
-        frames = msg.to_frames()
-
-        peers = [peer] if peer else self._zyre_peer.peers()
-        for p in peers:
-            self._zyre_peer.whisper(uuid.UUID(bytes=p), frames)
-
-        getLogger(__name__).info(f"Whispered keys to {len(peers)} peer(s): {list(self.authoritative_keys.keys())}")
-
     def register_key_handler(self, key: str, handler: Callable):
         """
         Register a key handler dynamically after MKTLComs has been created.
@@ -852,7 +823,6 @@ class MKTLComs:
         """
         self.authoritative_keys[key] = handler
         getLogger(__name__).debug(f"Registered key handler for {key}")
-        self.announce_keys()
 
     def on_key(self, key: str):
         """
@@ -916,7 +886,7 @@ class MKTLComs:
             t.join()
         logger.debug("All communication threads joined.")
 
-    def get(self, key: str, payload: Any=None, timeout: float = 2.0, destination: Optional[str] = None) -> MKTLMessage:
+    def get(self, key: str, payload: Any = None, timeout: float = 2.0, destination: Optional[str] = None) -> MKTLMessage:
         """
         Send a `get` request to another node and wait for its response.
 
