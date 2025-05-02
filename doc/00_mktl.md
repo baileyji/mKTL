@@ -2,39 +2,60 @@
 
 ## 1. Introduction
 
-The modern Keck Task Library (**mKTL**) protocol is a flexible, decentralized messaging system designed to manage instrument control, status monitoring, and data interchange at the **W. M. Keck Observatory**. It draws conceptual lineage from the original KTL system while embracing modern messaging infrastructure—particularly ZeroMQ multipart messaging—and a design that supports distributed authority, minimal centralization, and efficient extensibility.
+The modern Keck Task Library (**mKTL**) protocol is a flexible, decentralized messaging system designed to manage 
+instrument control, status monitoring, and data interchange at the **W. M. Keck Observatory**. It draws conceptual 
+lineage from the original KTL system while embracing modern messaging infrastructure — particularly ZeroMQ multipart 
+messaging with zyre and zgossip — in a design that supports distributed authority, minimal centralization, and 
+efficient extensibility... while maintaining the simplicity to embedd full mKTL compliant daemons in IoT-scale 
+embedded devices.
 
-This document defines the conceptual model, message protocols, key definitions, and architectural responsibilities that together constitute the mKTL system. It replaces and unifies prior documentation in `01_nomenclature`, `02_protocol`, and `03_config`.
+
+This document defines the conceptual model, message protocols, key definitions, and architectural 
+responsibilities that together constitute the mKTL system. It replaces and unifies prior 
+documentation in `01_nomenclature`, `02_protocol`, and `03_config`.
 
 ## 2. Conceptual Model
 
-At its core, the mKTL protocol enables **key-based communication and control** between distributed processes. The architecture supports daemon-driven instrumentation control, GUI tools, monitoring services, automated agents, and legacy bridges, all through a shared messaging model.
+At its core, the mKTL protocol enables **key-based communication and control** between distributed processes. 
+The architecture supports daemon-driven instrumentation control, GUI tools, monitoring services, automated agents, 
+and legacy bridges, all through a shared messaging model.
 
 ### 2.1 Keys and Stores
 
-The basic unit of mKTL is a **key**, which represents a control or telemetry channel. Keys are grouped into **stores**, each representing a logical subsystem (e.g., `guider`, `adc`, `power`). A full key name is a dot-delimited path of the form:
+The basic unit of mKTL is a **key**, which represents a control or telemetry channel. Keys are grouped into 
+**stores**, each representing a logical subsystem (e.g., `guider`, `adc`, `power`). A full key name is a 
+dot-delimited path of the form:
 
 ```
 <store>.<subsystem>.<key>
 ```
 
-The **store name** is always the first segment of the path. While a flat model (`store.key`) is supported, this format is compatible with **nested stores** and hierarchical namespaces. For example:
+The **store name** is always the first segment of the path. While a flat model (`store.key`) is supported, 
+this format is compatible with **nested stores** and hierarchical namespaces. For example:
 
 ```
 guider.status.exposure_id
 adc.temperature.board
 ```
 
-Future versions may support dynamic routing across such keypaths. However, stores are currently top-level routing units.
+Extension to support dynamic authority and routing across such keypaths is possible and could be implemented by routing
+or proxy nodes in the network or by a distributed negotiation by making the keys first-class objects. It is not, however,
+intrinsic to the on-the-wire IPC protocol level.
 
 ### 2.2 Participants and Authority
 
 There are two primary participant roles in mKTL:
 
-- **Clients** issue `get`, `set`, `config`, and `subscribe` operations.
-- **Daemons** serve authoritative values and configuration for a subset of keys, typically via `MKTLComs`.
+- **Clients** issue `get` and `set` requests and can subscribe to keys (which may or may not be published).
+- **Daemons** serve authoritative values and configuration for a subset of keys, they issue `ack`, `response`, and `config` messages
 
-A given key is **owned by exactly one daemon** (at a time). That daemon must respond to requests and optionally emit `publish` updates. Daemons advertise their key ownership to a **Registry**, allowing others to resolve key-to-identity mappings.
+The `MKTLComs` facility allows for any program to be simultaneously a **Client** and a **Daemon**, it only need to define a set of keys it 
+services for the swarm to be able to route `get` and `set` requests to it. 
+
+A given key is **owned by exactly one daemon**, though provision and planning has been done to allow for shadowing and proxying. 
+That daemon must respond to requests and optionally emit `publish` updates. Daemons advertise their key ownership 
+to the network, allowing other's `MKTLComs` to resolve key-to-network identity mappings without the need for any 
+centralized configuration file.
 
 ### 2.3 Values and Types
 
@@ -42,11 +63,11 @@ Key values are JSON-serializable by default. Supported native types include:
 
 - `int`, `float`, `bool`, `str`
 - `enum` (named string values mapped to integers)
-- `json` (arbitrary nested structures)
 - `binary` (attached as separate message frame)
 - `timestamp`, `status`, `duration`, etc.
-
-Compound and structured values are encouraged. Enums are especially preferred over unstructured strings or numeric codes, allowing self-describing protocols:
+- json serialization of enitre first-class objects is possible
+Compound and structured values are encouraged. Enums are especially preferred over unstructured strings or 
+numeric codes, allowing self-describing protocols:
 
 ```json
 {
@@ -69,67 +90,83 @@ All mKTL communication takes place over **multipart ZeroMQ messages** with clear
 - `ack`: early confirmation that a request was received
 - `response`: actual reply to `get` or `set`
 - `error`: structured failure message
-- `publish`: unsolicited updates from daemons
+- publish: unsolicited updates from daemons published via their zmq publish socket.
 
 Message types and framing are defined in Section 3.
 
 Additional notes:
 
-- A response is **always preceded by an `ack`**, unless the reply is immediate.
-- **Bulk binary payloads** are sent as an additional frame after the JSON payload.
-- **Bundles** of related publishes may be sent under a common topic, e.g., `guider.exposure;bundle`.
+- A response is **optionally** preceded by an `ack`, if the reply is not within a small timeout the lack of an `ack` will indicate failure,.
+- **Bulk binary payloads** are sent as an additional frame after the JSON payload and shall be described in the JSON
+- **Bundles** of related values may be got/set under a common keypath superset, e.g., `guider.exposure` could include a nested json dict of `key`:`key_dict`
+  - Implementation would presently be at the daemon / handler level vs the MKTLComs object.
+  - Clients are not required to support bundled get or set requests (nb this is harder on embedded systems)  
+
 
 ### 2.5 Roles of Registry and Discovery
+**OBSOLETE** zyre support for decentralized registration has been added. 
 
-The **Registry** daemon maintains knowledge of active keys and their owning `MKTLComs` identities and addresses. It is queried by other `MKTLComs` instances as needed, and optionally pushes updates (via `set`) to daemons that have previously queried it.
+One or more KTL-mKTL bridge daemon(s) are required to act as a bridge between the KTL and mKTL land. 
 
-The Registry does not function as a central broker—it simply assists with initial discovery and consistency of routing.
+~~The **Registry** daemon maintains knowledge of active keys and their owning `MKTLComs` identities and addresses. 
+It is queried by other `MKTLComs` instances as needed, and optionally pushes updates (via `set`) to daemons that have previously queried it.~~
 
-- Each daemon registers its keys on startup (or dynamically)
-- Other daemons or clients request config and identity info as needed
-- **Static configuration** (YAML or JSON) is used for legacy bridges or non-dynamic systems
+~~The Registry does not function as a central broker—it simply assists with initial discovery and consistency of routing.~~
+
+- Each daemon registers its keys dynamically
+- `MKTLComs` requests config and identity info as needed without higher level intervention
+- **Static configuration** is used at a daemon level for legacy bridges to KTL
 
 ### 2.6 mKTLComs and Communication Patterns
 
 The `MKTLComs` object is the primary communication interface for daemons and tools. It:
 
-- Binds a `ROUTER` socket for receiving requests
-- Connects a `DEALER` socket to peers for outbound requests
+- Employs the zyre and zgossip RFCs of zmq to "whisper" between `MKTLComs` and perform autodiscovery of peers
+  - **Makes it so that all the daemon needs to know is the mKTL key to get or set or what it wants to do with the argumets sent in a request a key it serves**
 - Publishes via a `PUB` socket
-- Subscribes via a `SUB` socket (optional)
-- Interfaces with `MKTLMessage`, subscription queues, and callbacks
-- Connects to the Registry for routing resolution
+- Subscribes via a `SUB` socket
+- Provides client code with `MKTLMessage` objetes that:
+  - make `ack()`, `respond()`, `fail()` trivial, and hides JSON (de)serialization
+  - provides direct access to the raw JSON and binary data
+- Offers thread-safe subscription queues and and callbacks
 
-Clients may create lightweight `MKTLComs` instances to perform transient actions, while daemons typically persist with a well-known identity and set of keys.
+Lightweight `MKTLComs` instances can be transient, though rapidly crerating and destrying them is not recommended
+
 
 ## 3. Message Architecture
 
-mKTL uses **ZeroMQ multipart messages** for all communication. This allows for clean separation of routing, message metadata, and payload content—including bulk binary data when needed. All operations are carried out over two primary messaging patterns: **Request/Reply** and **Publish/Subscribe**.
+mKTL uses **ZeroMQ multipart messages** per the zyre RFC for all communication. This allows for clean separation of 
+routing, message metadata, and payload content—including bulk binary data when needed. The **Publish/Subscribe** 
+pattern is also used.
 
 ### 3.1 ZeroMQ Socket Roles
 
-| Pattern           | Role             | Description                                                                 |
-|-------------------|------------------|-----------------------------------------------------------------------------|
-| Request/Reply     | `DEALER/ROUTER`  | Used for directed operations: get, set, command, query, etc.                |
-| Publish/Subscribe | `PUB/SUB` or `XPUB/XSUB` | Used for unsolicited updates and broadcasts                                |
+| Pattern          | Role                     | Description                                                               |
+|------------------|--------------------------|---------------------------------------------------------------------------|
+| zyre      | `WHISPER`                | Used for directed operations: get, set, config, ack, response, error |
+| Publish/Subscribe | `PUB/SUB` or `XPUB/XSUB` | Used for unsolicited updates and broadcasts                               |
 
-mKTL explicitly avoids using ZeroMQ’s `REQ/REP` sockets due to their enforced strict alternation. `DEALER/ROUTER` is used to support asynchronous and pipelined interactions.
+
+mKTL explicitly avoids using ZeroMQ’s `REQ/REP` or `DEALER/ROUTER` sockets directly instear allying zyre to handle this for better performance.
+zyre, however is a relative thin layer so embedded clients are quite manageable.
+
 
 ### 3.2 Framing Model
 
 All mKTL messages are **multipart** and follow consistent framing conventions.
 
-### 3.3 Request/Reply Message Format
+### 3.3 Message Format
 
-| Frame # | Name           | Description                                                            |
-|---------|----------------|------------------------------------------------------------------------|
-| 0       | `ROUTING_ID`   | Only present on ROUTER sockets. Identifies the request origin.         |
-| 1       | `b''`          | Empty delimiter between routing and content.                          |
-| 2       | `MESSAGE_TYPE` | e.g. `"get"`, `"set"`, `"ack"`, `"response"`, `"error"`                |
-| 3       | `REQUEST_ID`   | Unique identifier to match responses to requests.                      |
-| 4       | `KEY`          | Dot-delimited keypath (e.g., `"adc.enabled"`).                         |
-| 5       | `JSON_PAYLOAD` | Required. Encodes parameters, return values, metadata, etc.            |
-| 6       | `BULK_PAYLOAD` | Optional. Present only if binary content is being transferred.         |
+| Frame # | Name                | Description                                                       |
+|---------|---------------------|-------------------------------------------------------------------|
+| 0       | ZYRE_TYPE           | zyre rfc:  message type, mKTL messages are always `WHISPER`       |
+| 1       | PEER_ID             | zyre rfc: Identifies the message origin                           |
+| 2       | PEER_NAME           | zyre rfc: peers's name                                            |
+| 3       | `MESSAGE_TYPE`      | e.g. `b"get"`, `b"set"`, `b"ack"`, `b"response"`, `b"error"`      |
+| 4       | `REQUEST_ID`        | UUID bytes to match responses to requests.                        |
+| 5       | `KEY`               | Dot-delimited keypath (e.g., `"adc.enabled"`).                    |
+| 6       | `mKTL_JSON_PAYLOAD` | Required. Encodes parameters, return values, metadata, etc.       |
+| 7       | `BULK_PAYLOAD`      | Optional. Present only if binary content is being transferred.    |
 
 ### 3.4 Supported Message Types
 
@@ -141,8 +178,7 @@ All mKTL messages are **multipart** and follow consistent framing conventions.
 | `response` | Fulfillment of a `get` or `set` operation             |
 | `error`    | Failure or rejection (invalid key, bad format, etc.)  |
 | `config`   | Request the configuration (StoreConfig) of a Store    |
-| `ping`     | Connectivity check                                    |
-| `hello`    | Optional identity announcement                        |
+
 
 ### 3.5 Publish/Subscribe Message Format
 
@@ -179,16 +215,16 @@ Each key entry contains a metadata dictionary.
 
 ### 4.2 Key Metadata Fields
 
-| Field           | Description                                                                 |
-|------------------|-----------------------------------------------------------------------------|
-| `type`           | Declares the type of the key’s value. See below for supported types.        |
-| `readonly`       | Boolean. If true, external `set` operations are not allowed.                 |
-| `default`        | Optional. The default or startup value.                                     |
-| `value`          | (Runtime only) The current value, returned in a CONFIG response.            |
-| `units`          | Optional string describing physical units (e.g. `"nm"`, `"V"`, `"K"`).      |
-| `doc`            | A short human-readable description of the key’s purpose.                    |
-| `last_updated`   | (Runtime only) ISO 8601 timestamp of last update.                           |
-| `hash`           | (Optional) Hash of the current value for caching or deduplication.          |
+| Field           | Description                                                                   |
+|------------------|-------------------------------------------------------------------------------|
+| `type`           | Declares the type of the key’s value. See below for supported types.          |
+| `readonly`       | Boolean. If true, external `set` operations are not allowed.                  |
+| `default`        | Optional. The default or startup value.                                       |
+| `value`          | (Runtime only) The current value, returned in a CONFIG response.              |
+| `units`          | Optional string describing physical units (e.g. `"nm"`, `"V"`, `"K"`).        |
+| `doc`            | A short human-readable description of the key’s purpose.                      |
+| `last_updated`   | (Runtime only) ISO 8601 timestamp of last update.                             |
+| `hash`           | (Optional) Hash of the current value for caching or deduplication.            |
 | `keypath`        | Optional. Canonical hierarchical path; useful if flat keys used as dict keys. |
 
 Additional optional fields may include:
@@ -377,9 +413,13 @@ This enables observatory systems to adopt the new architecture **incrementally**
 
 ## 7. Appendices
 
+**OUTDATED: Describes what was used for LRIS2 CSU demo review, not current with zyre enhancements.**
+
+
 ### 7.1 Framed Request/Response Message Examples
 
 These examples show **actual ZeroMQ multipart message frames** using Python-style notation. Each element in the list is a `bytes` object.
+
 
 #### ➤ `get` Request and Response
 
@@ -486,6 +526,8 @@ These examples show **actual ZeroMQ multipart message frames** using Python-styl
 ---
 
 ### 7.4 Static Configuration Format (YAML)
+
+Potential example of YAML config
 
 ```yaml
 name: camera

@@ -13,6 +13,7 @@ Typical usage:
 
     val, blob = coms.get("another.service.key")
 """
+from collections import defaultdict
 from dataclasses import dataclass
 from logging import getLogger
 import zmq
@@ -74,7 +75,10 @@ class MKTLMessage:
         self.coms = coms
         self.sender = sender
         self.msg_type = msg_type
-        self.req_id = req_id if isinstance(req_id, UUID) else UUID(bytes=req_id)
+        if msg_type is 'publish':
+            self.req_id = None
+        else:
+            self.req_id = req_id if isinstance(req_id, UUID) else UUID(bytes=req_id)
         self.key = key
         self.json_data = json_data
         self.binary_blob = binary_blob
@@ -87,7 +91,8 @@ class MKTLMessage:
         logger.debug(f"MKTLMessage created: msg_type={msg_type}, key={key}, req_id={req_id}")
 
     def __repr__(self):
-        return (f'<MKTLMessage {self.msg_type}, {self.req_id}, {self.key}, {self.json_data}, {self.binary_blob}, '
+        return (f'<MKTLMessage {self.msg_type}, {self.req_id}, {self.key}, {self.json_data}, '
+                f'blob={len(self.binary_blob)/1024 if self.binary_blob is not None else 0} KiB, '
                 f'sender={self.sender}, coms={self.coms}>')
 
     def has_blob(self):
@@ -395,8 +400,8 @@ class MKTLComs:
         self._pending_subscriptions = set()
         self._pending_lock = threading.Lock()
 
-        self._sub_callbacks: Dict[str, List[Callable]] = {}
-        self._sub_listeners: Dict[str, List[MKTLSubscription]] = {}
+        self._sub_callbacks: Dict[str, set[Callable]] = defaultdict(set)
+        self._sub_listeners: Dict[str, List[MKTLSubscription]] = defaultdict(list)
         self._routing_table: Dict[str, MKTLPeer] = {}  # key -> identity
 
         self._shutdown_callback = shutdown_callback
@@ -657,13 +662,13 @@ class MKTLComs:
                 self._pending_subscriptions.clear()
 
             try:
-                msg_parts = self._sub_socket.recv_multipart()
+                msg_parts = self._sub_socket.recv_multipart(zmq.NOBLOCK)
                 logger.debug('Received multipart message on SUB socket')
                 if len(msg_parts) >= 2:
                     key = msg_parts[0].decode()
                     payload = json.loads(msg_parts[1].decode())
                     blob = msg_parts[2] if len(msg_parts) > 2 else None
-                    msg = MKTLMessage(self, b'', 'publish', b'', key, payload, blob)
+                    msg = MKTLMessage('publish',None, key,  payload, blob)
 
                     for prefix, callbacks in self._sub_callbacks.items():
                         if key.startswith(prefix):
@@ -677,6 +682,8 @@ class MKTLComs:
                         if key.startswith(prefix):
                             for listener in queues:
                                 listener.put(msg)
+            except zmq.Again:
+                pass
             except Exception as e:
                 logger.error(f'Error in _listen_loop: {e}', exc_info=True)
 
@@ -709,7 +716,7 @@ class MKTLComs:
                     frames = [key.encode(), json.dumps(payload).encode()]
 
                 socket.send_multipart(frames)
-                logger.debug(f'Sent multipart message: {key}')
+                logger.debug(f'Sent multipart message: {frames[0].decode()}')
             except Exception as e:
                 logger.error(f"Error in _publish_loop: {e}", exc_info=True)
                 raise   #TODO
@@ -784,19 +791,19 @@ class MKTLComs:
         logger.info("Starting MKTLComs communication threads.")
         self._running = True
 
-        t = threading.Thread(target=self._serve_loop, daemon=True)
+        t = threading.Thread(name='MKTL thread', target=self._serve_loop, daemon=True)
         logger.info('Starting serve loop thread')
         t.start()
         self._threads.append(t)
 
         if self._pub_address:
-            t_pub = threading.Thread(target=self._publish_loop, daemon=True)
+            t_pub = threading.Thread(name='PUB thread', target=self._publish_loop, daemon=True)
             logger.info('Starting publish loop thread')
             t_pub.start()
             self._threads.append(t_pub)
 
         if self._sub_address:
-            t_sub = threading.Thread(target=self._listen_loop, daemon=True)
+            t_sub = threading.Thread(name='SUB thread', target=self._listen_loop, daemon=True)
             logger.info('Starting listen loop thread')
             t_sub.start()
             self._threads.append(t_sub)
@@ -867,17 +874,22 @@ class MKTLComs:
             MKTLSubscription object for manual message retrieval.
         """
         logger = getLogger(__name__)
-        logger.info(f"Requesting subscription to prefix={key_prefix}")
+        if isinstance(key_prefix, str):
+            key_prefix = [key_prefix]
+        logger.info(f"Requesting subscription to prefixes: {key_prefix}")
         with self._pending_lock:
-            self._pending_subscriptions.add(key_prefix)
+            for k in key_prefix:
+                self._pending_subscriptions.add(k)
 
         if callback:
-            self._sub_callbacks.setdefault(key_prefix, []).append(callback)
+            for k in key_prefix:
+                self._sub_callbacks[k].add(callback)
             logger.debug(f"Callback registered for prefix={key_prefix}")
 
         listener = MKTLSubscription()
-        self._sub_listeners.setdefault(key_prefix, []).append(listener)
-        logger.debug(f"Created MKTLSubscription for prefix={key_prefix}")
+        for k in key_prefix:
+            self._sub_listeners[k].append(listener)
+        logger.debug(f"Created MKTLSubscription for prefixes: {key_prefix}")
         return listener
 
     def publish(self, key: str, payload: dict, binary_blob: Optional[bytes] = None):
