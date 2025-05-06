@@ -1,0 +1,789 @@
+<<<<<<<< HEAD:doc/legacy_arch.txt
+This document defines the common nomenclature used within mKTL. Some of the
+terms are inherited from KTL; some are inherited from common design patterns
+in the broader software world. Where there is a conflict between the two,
+we prefer to use the common industry definition rather than traditional use
+within WMKO.
+
+	- - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+			External definitions
+	- - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+	WMKO: W. M. Keck Observatory, where mKTL was initially
+		established, in collaboration with WMKO partner
+		institutions at the University of California and
+		California Institute of Technology.
+
+	KTL: Keck Task Library, the predecessor to mKTL at WMKO.
+		KTL is a key-value application programming interface
+		(API), written in C, and has been the dominant API
+		for interprocess communication at both WMKO and Lick
+		Observatory since the 1990's.
+
+	EPICS: Experimental Physics and Industrial Control System,
+		another key-value API that WMKO adopted for its
+		telescope control system and adaptive optics control
+		system. EPICS is one of the interprocess communication
+		APIs that KTL provides a common abstraction for.
+
+	- - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+			mKTL-specific terms
+	- - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+	mKTL: modern Keck Task Library. It's just a name, but it's
+		ours, and was the clear choice out of a field of a
+		dozen options that were presented to the future
+		power users of the protocol.
+
+	Daemon: a persistent process responsible for some or all of
+		the key-value pairs in a given store. When client
+		requests are initiated it is the daemon that will be
+		contacted to satisfy the request. This is analagous
+		to a KTL dispatcher, or an EPICS IOC.
+
+	Store: a store is an aggregation of individual key-value
+		pairs. Within a given deployment of mKTL the store
+		will have a unique name. This is analagous to a KTL
+		service, or an EPICS database, and is effectively
+		an associative array, or a Python dictionary.
+		"Database" is another term used in similar contexts,
+		but that term is more commonly used in reference to
+		a relational database.
+
+	Key: a unique name within a store, identifying a single
+		key-value pair. This is analagous to a KTL keyword,
+		or an EPICS channel.
+
+	Value: the other half of the key-value pair. Like a KTL
+		keyword, a mKTL value can be one of many native
+		types (integer, floating point, string, etc.),
+		and includes the possibility of compound values,
+		similar to KTL arrays.
+
+	Item: the combination of the key/value pair. This term is
+		borrowed from Python's dictionary, where it has a
+		similar meaning. In the context of mKTL, the Store
+		class in the reference Python module will return
+		Item instances when referenced by the key.
+
+	Get: retrieve a value corresponding to an individual key
+		in a store. A typical client can issue a blocking
+		or a non-blocking (synchronous or asynchronous)
+		operation. This is analagous to a KTL read or an
+		EPICS get.
+
+	Set: establish a new value for an individual key in a
+		store. A typical client can request a blocking
+		or a non-blocking (synchronous or asynchronous)
+		operation. This is analagous to a KTL modify or
+		an EPICS put.
+
+	Publish: broadcast a new value for an individual key in a
+		store. The store name combined with the key makes
+		up the bulk of the topic, as understood for a
+		typical publish-subscribe design pattern.
+
+		https://en.wikipedia.org/wiki/Publish%E2%80%93subscribe_pattern
+
+	Subscribe: request the receipt of any/all published broadcasts
+		of an individual key in a store. This is analagous to
+		a KTL monitor or EPICS monitor request.
+
+	Callback: a method to be called whenever a published broadcast
+		arrives for an individual key in a store.
+
+	Register: the act of associating a callback with a specific
+		key in a store. The callback will now be invoked
+		whenever the value of that key changes. "Connect"
+		is another term used in similar contexts, but that
+		term is more commonly used with network sockets.
+
+
+mKTL clients and daemons communicate using ZeroMQ sockets. This document
+describes the socket types used, the formatting of the messages, and the
+types of requests that can be made.
+========
+>>>>>>>> a873554263eecefaf2fb61d23761ba9d23290126:doc/protocol.rst
+
+.. _protocol:
+
+Protocol
+========
+
+The mKTL protocol is the primary interface layer for mKTL as a whole;
+associated Python code can be considered a reference implementation,
+but the intent is for the protocol to be language agnostic. mKTL clients
+and daemons communicate using ZeroMQ sockets. This document describes the
+socket types used, the formatting of the messages, and the types of requests
+that can be made.
+
+
+.. _request:
+
+Request/response
+----------------
+
+The first socket type implements a request/response pattern. This represents
+the majority of the interactive traffic between a mKTL client and daemon.
+Because requests can be asynchronous, mKTL does not use the REQ/REP
+implementation in ZeroMQ, which enforces a strict one request, one response
+pattern; instead, we use DEALER/ROUTER, which allows any amount of messages
+in any order, in any direction.
+
+The request/response interaction between the client and daemon is of this form::
+
+	b"{'request': 'REQ', 'id': some integer, ...}"
+
+	b"{'message': 'ACK',
+	   'id': matching the original request,
+	   'time': timestamp for this acknowledgement}"
+
+All messages on ZeroMQ sockets are formatted as raw bytes. JSON is used
+as a convenient and portable way to encapsulate both the request and the
+response.
+
+The daemon immediately issues the ACK response upon receipt of the request.
+The absence of a quick response indicates that the daemon is not available,
+and the client should immediately raise an error. After the client receives
+the initial ACK it should then look for the full response::
+
+	b"{'message': 'REP',
+	   'id': matching the original request,
+	   'time': timestamp for this response,
+	   'data': response payload}"
+
+After receiving the REP message the request is complete and the daemon will
+issue no further messages with this request ID. All requests are handled
+fully asynchronously; a client could send a thousand requests in quick
+succession, but the responses will not be serialized, and the response order
+is not guaranteed. Synchronous behavior is implemented on the client side,
+not in the protocol itself.
+
+Here is an example of what the full exchange on the client side might look
+like, in this case handling the exchange as a synchronous request::
+
+        self.socket = zmq_context.socket(zmq.DEALER)
+        self.socket.setsockopt(zmq.LINGER, 0)
+        self.socket.identity = identity.encode()
+        self.socket.connect(daemon)
+
+	self.socket.send(request)
+	result = self.socket.poll(100) # milliseconds
+	if result == 0:
+	    raise zmq.ZMQError('no response received in 100 ms')
+
+	ack = self.socket.recv()
+	response = self.socket.recv()
+
+Some responses may include a bulk data component. These will be distinguished
+by having a 'bulk' attribute set in the response. Here is an example response::
+
+	b"{'message': 'REP',
+	   'id': 0xdeadbeef,
+	   'time': 1715738507.234,
+	   'data': JSON description of bulk data,
+	   'bulk': True}"
+
+The 'bulk' setting in the message contents indicates that a binary data blob
+will be sent in a separate message. The message format would look like::
+
+	b'bulk:kpfguide.LASTIMAGE deadbeef 6712437631249763124962431...'
+
+...where the first whitespace separated field is largely noise for the REP
+case, the important metadata is the unique id linking the two responses,
+but the message structure is identical to the PUB version (which needs the
+"topic") so that any bulk data handling code can be shared. The second
+whitespace separated field is the same unique identifier found in the JSON
+from the other half of the response. All remaining data after the subsequent
+whitespace is a pure byte sequence representing the payload. Both messages
+must arrive for either component to have any meaning; the 'data' from the
+JSON response will include enough information to reconstruct the binary blob,
+which at the present time is only envisioned as image data, or more generally,
+something that can be represented as a NumPy array. Thus, the 'data' would
+include information like the dimensions of the array and its datatype (int16,
+uint32, float64, etc.).
+
+The motivation for separating the bulk data into its own message type is
+performance. The bulk data would need to be encoded as a string (base64, etc.)
+to be usable in JSON; the encoding step alone is very demanding of processor
+time, appending it to a JSON structure makes it an order of magnitude slower.
+The combination of these additional processing steps is adequate to prevent
+a simple client from saturating a basic gigabit network link with continuous
+bulk data requests, whereas saturating the link is trivial with raw bytes.
+
+
+.. _request_types:
+
+Request types
+-------------
+
+This section describes the various requests a client can make of the mKTL
+daemon via the request/response socket.
+
+.. list-table::
+
+  * - *Request type*
+    - *Description*
+
+  * - **GET**
+    - Request the current value for a single key. The key is always the name of
+      the store, and the name of the item, concatenated with a period. The data
+      field will be as in the description of the REQ/REP behavior; bulk data,
+      as described above, is sent as raw bytes in a second message.
+
+      The default behavior for a GET request is for a cached value to be
+      allowed as the returned response. A client can explicitly request an
+      up-to-date value by setting the 'refresh' field to 'True'; in that case,
+      the daemon should provide the most up-to-date value available, even if
+      that means communicating with a hardware controller to satisfy the
+      request.
+
+      Example request/response exchange::
+
+        b"{'request': 'GET',
+	   'name': 'kpfpower.OUTLET_1A',
+	   'refresh': True,
+	   'id': 5742}"
+
+	 b"{'message': 'ACK',
+	    'id': 5742,
+	    'time': 1723668130.123456}"
+
+	 b"{'message': 'REP',
+	    'id': 5742,
+	    'time': 1723668130.124,
+	    'data': {'bin': 0, 'asc': 'Off'}}"
+
+  * - **SET**
+    - Request a change to the value of a single key. Depending on the daemon,
+      this could result in a variety of behavior, from simply caching the value
+      to slewing a telescope, and anything in-between. The final response
+      indicates the request is complete but does not indicate what the new
+      item value is.
+
+      Example request/response exchange::
+
+        b"{'request': 'SET',
+	   'name': 'kpfpower.OUTLET_1A',
+	   'id': 5744,
+	   'data': 'On'}"
+
+	b"{'message': 'ACK',
+	   'id': 5744,
+	   'time': 1723668131.214123}"
+
+	b"{'message': 'REP',
+	   'id': 5744,
+	   'time': 1723668134.12549}"
+
+      If the SET request results in an error, the response might instead be::
+
+	b"{'message': 'REP',
+	   'id': 5744,
+	   'time': 1723668132.12549,
+	   'error': {'type': 'ValueError', 'text': 'bad input'}}"
+
+  * - **HASH**
+    - Request the current hash identifiers for any known configuration blocks
+      of a single mKTL store. If no store name is specified, all available hash
+      identifiers will be returned, for all known stores. An error will be
+      returned if a store is requested and the responding daemon does not have
+      a cached configuration for that store.
+
+      The hash is 32 hexadecimal integers. The actual hash format is not
+      significant, as long as the source of authority is consistent about
+      which hash format it uses, and the format can be bounded to 32
+      hexadecimal integers.
+
+      To unify processing the response is always a dictionary of dictionaries,
+      even if only one hash is available.
+
+      Example request/response exchange for all hashes::
+
+	b"{'request': 'HASH', 'id': 234}"
+
+	b"{'message': 'ACK',
+	   'id': 234,
+	   'time': 1723634131.214123}"
+
+	b"{'message': 'REP',
+	   'id': 234,
+	   'data': {'kpfguide': {'uuid1': 0x84a30b35...,
+				 'uuid2': 0x983ae10f...},
+		    'kpfmet': {'uuid6': 0xe0377e7d...,
+			       'uuid7': 0x7735a20a...,
+			       'uuid8': 0x88645dab...,
+			       'uuid9': 0x531c14fd...}}}"
+
+      Example request/response exchange for one store::
+
+	b"{'request': 'HASH',
+	   'id': 236,
+	   'data': 'kpfguide'}"
+
+	b"{'message': 'ACK',
+	   'id': 236,
+	   'time': 1723634182.214123}"
+
+	b"{'message': 'REP',
+	   'id': 236,
+	   'data': {'kpfguide': {'uuid1': 0x84a30b35...,
+				 'uuid2': 0x983ae10f...}}"
+
+  * - **CONFIG**
+    - Request the full configuration contents for a single mKTL store.
+      There is no option to dump the configuration data for all known stores.
+      A typical client interaction will request the configuration hash first,
+      and if the local copy is not a match, request the full contents from
+      the daemon to update the local cache.
+
+      The configuration contents are not fully described here, this is just
+      a representation of the request. See the
+      :ref:`configuration documentation <configuration>` for a full description
+      of the data format.
+
+      Example request::
+
+	b"{'request': 'CONFIG',
+	   'id': 563,
+	   'name': 'kpfguide'}"
+
+
+Publish/subscribe
+-----------------
+
+The second socket type implements a publish/subscribe socket pattern. The
+desired functionality in mKTL is a neat match for the PUB/SUB socket pattern
+offered by ZeroMQ:
+
+	* SUB clients subscribe to one or more topics from
+	  a given PUB socket, or can subscribe to all topics
+	  by subscribing to the empty string. This aligns well
+	  with existing usage patterns, where KTL keyword
+	  names and EPICS channel names are treated as unique
+	  identifiers, and map easily to a PUB/SUB topic.
+
+	* The filtering of topics occurs on the daemon side,
+	  so if a PUB is publishing a mixture of high-frequency
+	  values or large broadcasts, and a client is not
+	  subscribed to those topics, the broadcasts are never
+	  sent to the client.
+
+The ZeroMQ messages received by the client include the full topic as the
+leading element in the message-as-bytes, followed by a space, followed by
+the remainder of the message contents. The structure of a simple broadcast
+mimics the form of the request/response exchange described above::
+
+        b"unique_topic_string {'message': 'PUB',
+			       'id': eight hexadecimal digits,
+			       'time': timestamp for this broadcast,
+			       'name': unique mKTL item name,
+			       'data': current item value}"
+
+There are two special types of broadcast messages. These are distinguished
+by a modifier on the topic string. The first type is the bulk/binary data
+broadcast type, as described above for a REP response; there is a similar
+PUB broadcast with otherwise exactly the same structure, setting the 'bulk'
+flag in the PUB message to True, and the bulk data transmitted in a separate
+message. The topic for the bulk message has a 'bulk:' prefix to avoid
+accidentally subscribing to bulk messages, since ZeroMQ uses a leading
+substring match on the topic when a client initiates a subscription.
+
+The second type of special broadcast message is a bundle of related broadcasts.
+If a daemon so chooses, it can collect related telemetry in a single broadcast;
+this offers clients the option of treating the entire bundle as an atomic
+entity. Each bundle is a sequence of simple JSON messages as described above.
+
+If, for example, there was a bundle of telemetry messages relating to a filter
+wheel, the individual items might have keys like::
+
+	deimot.FILTERNAM
+	deimot.FILTERORD
+	deimot.FILTERRAW
+
+The mKTL daemon could elect to broadcast a single bundle containing all of those
+values. The bundle message would have a topic identifier of::
+
+	deimot.FILTER;bundle
+
+The formatting of the on-the-wire message would be::
+
+	b'deimot.FILTER;bundle JSON...'
+
+...where the JSON would be a sequence of individual PUB elements as described
+above::
+
+	[{'message': 'PUB', 'id': 0x0123abcd, 'name': deimot.FILTERNAM, ...},
+	 {'message': 'PUB', 'id': 0x0123abcd, 'name': deimot.FILTERORD, ...},
+	 {'message': 'PUB', 'id': 0x0123abcd, 'name': deimot.FILTERRAW, ...}]
+
+The 'id' field would be identical for all messages in the bundle, but all
+remaining fields would vary according to the message contents.
+
+
+Message fields
+--------------
+
+This section is a description of the various fields used in the JSON messaging
+described above.
+
+===============	===============================================================
+*Field*		*Description*
+===============	===============================================================
+**request**	Only issued by a client, making a request of a server.
+		The potential values for the request field are all described
+		in the :ref:`request_types` section.
+
+**message**	Only issued by a server, to be interpreted by the client.
+		This is a one-word assertion of the type of content
+		represented by this message. It is one of the following
+		values:
+
+                =======	==================================================
+		**ACK**	Immediate acknowledgement of a request. If this
+			response is not received with a very small time
+			window after the initial request, the client can
+			and should assume the daemon handling that request
+			is offline.
+
+		**REP**	A response to a direct request. This will contain
+			the full data responding to a request to get a
+			value, or the completion status of setting a value.
+
+		**PUB**	An asynchronous broadcast of an event. There aren't
+			any other types of message that will arrive on a
+			SUB socket, the inclusion of this field is strictly
+			for symmetry's sake.
+                =======	==================================================
+
+**id**		An eight character hexadecimal value reasonably unique to
+		this specific transaction. The 'unique' constraint doesn't
+		need to extend beyond a few minutes, at most, for any
+		transaction; the id allows the client to tie together
+		ACK and REP messages, to combine the JSON with the data
+		buffer for a 'bulk' broadcast, and to further associate
+		individual PUB messages contained in a 'bundle' broadcast.
+		For client-initiated requests, the client is expected to
+		provide a sufficiently unique integer to allow it to
+		associate all responses with the initial request. For
+		daemon-initiated broadcasts, the uniqueness constraint
+		should only be applied for a given key, as opposed to
+		being unique across an entire store or daemon.
+
+**time**	A UNIX epoch timestamp associated with the generation of
+		the event. This is not intended to represent any time
+		prior to the actual broadcast or response, it is intended
+		to represent the time at which that message was created,
+		such that 'now' - 'time' should represent the transmission
+		and mKTL handling delay between the daemon and the client.
+		This timestamp should not be expected to represent the
+		last known change of the value in question, though in some
+		(if not most) cases it will be a reasonable approximation.
+
+**name**	The unique mKTL key, or the unique mKTL store name for some
+		of the metadata queries. The mKTL key, at the protocol level,
+		is a concatenation of the mKTL store name and the item name
+		within that store. In KTL parlance, this would be the
+		service.KEYWORD name; in EPICS parlance, it would be the full
+		IOC+channel name, as one might use with caput or caget on the
+		command line.
+
+**data**	The real payload of the message. For a read operation, this
+		will be the telemetry requested, whether it be a string,
+		integer, floating point number, or short sequence. For a
+		response with no data this field will either not be present
+		or it will be the JSON null value.
+
+**bulk**	A boolean flag indicating there is a separate bulk-formatted
+		message that will contain the bulk data associated with
+		the message. If the value is not present, or is the JSON
+		null value, or is the JSON False value, there is no bulk
+		message.
+
+**error**	A JSON dictionary with information about any error that
+		occurred while processing the request. If the value is
+		not present or is the JSON null value, no error occurred.
+		If it is present, it will have these values:
+
+                =========	============================================
+		**type**	Analagous to the Python exception type
+				(ValueError, TypeError, etc.).
+
+		**text**	Descriptive text of the error.
+
+		**debug**	Optional additional information about the
+				error, such as a Python traceback.
+                =========	============================================
+
+		The intent of this error field is not to provide enough
+		information for debugging of code, it is intended to
+		provide enough information for the client to perform
+		meaningful error handling.
+
+<<<<<<<< HEAD:doc/legacy_arch.txt
+
+The configuration syntax describes what it means to be a mKTL store,
+enumerating the available keys and all their intrinsic metadata. This
+document lays out the configuration syntax, as might be returned from
+a CONFIG request, and additional conventions applied to configuration
+data.
+
+	- - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Refer to the protocol document for the expected format of a CONFIG request
+and response. Only one aspect of the response is addressed here: the 'data'
+value included in the response, which is a dictionary of dictionaries, each
+dictionary representing a configuration 'block', keyed by the unique
+identifier (UUID) associated with that block, providing a complete description
+of a single daemon's keys; the sequence is intended to represent the full
+namespace of a store, spanning the full set of daemons composing that store.
+
+For example, the 'kpfguide' store may contain multiple daemons:
+
+	{'uuid1': {'name': 'kpfguide', 'time': 1724892333.924, ...},
+	 'uuid2': {'name': 'kpfguide', 'time': 1725892343.567, ...}}
+
+A configuration block will contain the following fields:
+
+	'name': the name of the store. This is perhaps redundant
+		with other aspects of how the configuration block
+		is stored and transmitted, but the extra assertion
+		is inexpensive and convenient.
+
+	'uuid': the unique identifier associated with this block.
+		The UUID is generated internally and does not need
+		to be manipulated directly; it is used to uniquely
+		associate a specific daemon with its configuration
+		block, as might be necessary when a client needs
+		to apply continuity (such as clearing local cache)
+		when a remotely-served configuration block changes.
+
+	'provenance': the chain of handling for this configuration
+		block. The provenance is a sequence, listing every
+		daemon between the client and the original source
+		of authority for the block. Each element in the
+		sequence contains a stratum, hostname, and req port
+		number; the 'pub' port is optional, and will only
+		be present for daemons that can handle subscribe
+		requests. Clients will connect to the stratum zero
+		entry to handle any requests; this may change in
+		the future to allow identification of full proxies
+		for all req+pub traffic for a daemon.
+
+	'time': daemon-provided timestamp for the contents of this
+		block. The timestamp may change even if the contents
+		(and hash) do not.
+
+	'hash': a hash value for the 'keys' component of this block.
+		The hash is arbitrary and clients should not concern
+		themselves validating the contents of the block with
+		the hash; a change in the hash is used to signify the
+		contents have changed, and any/all clients relying on
+		the contents should update their cached data.
+
+	'keys': a dictionary of dictionaries, keyed by the key name,
+		with one dictionary containing the full description
+		of a single key. The description of an key is discussed
+		in its own section below.
+
+	- - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Similar to the configuration block for a store, the dictionary describing
+a key contains a set of fields that provide a complete description of the key.
+
+	'name': a terse string naming this key. The key name must
+		be unique across the entire store, not just within
+		this configuration block.
+
+	'type': the data type for the value associated with this
+		key. The type is one of: boolean, bulk, double,
+		double array, enumerated, integer, integer array,
+		mask, or string. The type is not strictly required,
+		but it is a useful hint for what the value is expected
+		to be. A more complete description of key types is
+		below.
+
+	'description': a human-readable description of what this key
+		represents. Could be one sentence, could be several;
+		ideally the reader can use this information to fully
+		understand the intent and function of the key/value
+		pair.
+
+	'units': terse description of the units for a numeric value.
+		If the value has multiple representations, there
+		could be a units value for each representation, for
+		example an angular value transmitted as radians but
+		also expressed in sexagesimal.
+
+	'persist': a boolean to indicate whether this item's value
+		should be persistent on the daemon side, such that
+		values persist across a restart of the daemon. This
+		is not common for hardware-facing daemons, where the
+		controller is the authoritative source for most item
+		values.
+
+	'gettable': generally not specified unless set to 'false',
+		which indicates this key will reject any attempts
+		to get its value. The use of this property is highly
+		discouraged, any key should have a meaningful value;
+		this property only exists for backwards compatibility.
+
+	'settable': generally not specified unless set to 'false',
+		which indicates this key will reject any attempts
+		to set a new value.
+
+	'enumerators': a dictionary mapping a human-readable string
+		representation to numeric values. This is only
+		meaningful for boolean, enumerated, and mask types.
+		An example set of enumerators for a boolean key
+		might be {'0': 'False', '1': 'True'}. Note that
+		in JSON a dictionary key must be a string, these
+		values can and should be cast back to integers
+		after the JSON is parsed.
+
+	- - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Each value type may be associated with one or more optional directives from
+the set above. Note that any value could also be empty, as expressed with the
+JSON null value.
+
+	'boolean': a two-state integer, either 0 or 1, with a string
+		representation that is usually something like false/true,
+		off/on, out/in, etc. The "truth" value should always map
+		to 1, though there will be some backwards-compatible
+		instances where a badly configured boolean value does
+		not adhere to this standard. A boolean is effectively
+		an enumerated value with only two enumerators.
+
+	'bulk': a true data array, analagous to a Numpy array, unlike
+		the legacy "numeric array" type, which is more like a
+		dictionary or named sequence.
+
+	'numeric': a numeric value, either a floating point number or
+		an integer. A numeric value will generally have a
+		'units' property defined.
+
+	'numeric array': a sequence of numeric values, often with
+		enumerators describing the individual values. This is
+		a legacy type definition intended solely for backwards
+		compatibility.
+
+	'enumerated': an integer value with a string representation
+		for each valid value. The valid enumerators are listed
+		in the 'enumerators' configuration property.
+
+	'mask': an integer value with a string representation for each
+		of the possible bits in the integer. The enumerators
+		reflect the status for each bit, counting from zero;
+		the '0' enumerator represents the mask value if the
+		zeroth bit is active, the '1' bit represents the value
+		if the next bit is set, and so on. If a mask has multiple
+		active bits the string representation is a concatenation
+		of the relevant strings, joined by commas. The "none"
+		enumerator reflects the string value if no bits are set.
+
+	'string': a text string of arbitrary length.
+
+	- - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Here is a two-key example for what a "full" configuration block may look like
+in its JSON format:
+
+      {
+        "name": "pie",
+        "hash": 236000907473448652729473003892320198915,
+        "uuid": "8017ad5b-07a7-5135-a024-c46a0b79b74e",
+        "time": 1738177027.4993615,
+        "provenance": [
+          {
+            "stratum": 0,
+            "hostname": "chonk",
+            "req": 10112,
+            "pub": 10139
+          }
+        ]
+        "keys": {
+          "ANGLE": {
+            "type": "double",
+            "units": {
+              "asc": "h",
+              "bin": "rad"
+            },
+            "description": "Writable angle keyword.",
+	    "persist": "true"
+          },
+          "DISPSTOP": {
+            "type": "boolean",
+            "description": "Dispatcher shutdown command. Tells dispatcher to exe
+cute a clean shutdown.",
+            "enumerators": {
+                "0": "no",
+                "1": "yes"
+            }
+          }
+	}
+      }
+
+	- - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Configuration files are stored on-disk as part of a bootstrapping mechanism
+to prevent transmission of configuration blocks for every new connection.
+Two directory trees have been established; one, an automatic cache for any
+received configuration blocks, and two, a tree for configuration data used
+by 'stratum 0' daemons providing authoritative access to a set of keys.
+
+The MKTL_HOME environment variable, if set, determines the top-level directory
+used for these on-disk locations. Absent that variable being set, the default
+location is '$HOME/.mKTL'.
+
+The cache directory structure is as follows:
+
+        $MKTL_HOME/
+        $MKTL_HOME/client/cache/
+        $MKTL_HOME/client/cache/some_store_name/
+        $MKTL_HOME/client/cache/some_store_name/some_uuid.json
+        $MKTL_HOME/client/cache/some_store_name/some_other_uuid.json
+
+For each store name, each configuration block within a store is written to a
+separate file, where each file is named for the UUID associated with that
+configuration block.
+
+The daemon directory structure is as follows:
+
+        $MKTL_HOME/daemon/store/
+        $MKTL_HOME/daemon/store/some_store_name/
+        $MKTL_HOME/daemon/store/some_store_name/some_keys.json
+        $MKTL_HOME/daemon/store/some_store_name/some_keys.uuid
+
+The .json file located here is where a daemon is expected to establish the
+keys it provides. The adjacent .uuid file is auto-generated; the only content
+of the file is a single UUID. If the .uuid file exists it will be used,
+regardless of its origins, but there is no need for the developer to establish
+it as part of the daemon's initial configuration. Unlike the cached client
+side configuration file, the daemon configuration file only includes the
+'keys' component, the structure above that is missing. This would be the
+daemon-side .json file for the above two-key example:
+
+	{
+          "ANGLE": {
+            "type": "double",
+            "units": {
+              "asc": "h",
+              "bin": "rad"
+            },
+            "description": "Writable angle keyword."
+          },
+          "DISPSTOP": {
+            "type": "boolean",
+            "description": "Dispatcher shutdown command. Tells dispatcher to exe
+cute a clean shutdown.",
+            "enumerators": {
+                "0": "no",
+                "1": "yes"
+            }
+          }
+	}
+========
+===============	===============================================================
+
+>>>>>>>> a873554263eecefaf2fb61d23761ba9d23290126:doc/protocol.rst

@@ -42,7 +42,7 @@ class Store(store.Store):
         self._items = dict()
         self.daemon_config = None
         self.daemon_uuid = None
-        self._daemon_items = set()
+        self._daemon_keys = set()
 
         daemon_config = file.load(name, cfg)
         self._update_daemon_config(daemon_config)
@@ -165,7 +165,7 @@ class Store(store.Store):
         cache.add(self.name, cfg)
 
         config = items.get(self.name)
-        self._daemon_items.update(config)
+        self._daemon_keys.update(config)
         self._update_config(config)
 
     def setup(self):
@@ -181,7 +181,7 @@ class Store(store.Store):
             implementations.
         """
 
-        local = list(self._daemon_items)
+        local = list(self._daemon_keys)
 
         for key in local:
             x = self._items[key]
@@ -247,7 +247,7 @@ class RequestServer(request.Server):
         key = request['name']
         store, key = key.split('.', 1)
 
-        if key in self.store._daemon_items:
+        if key in self.store._daemon_keys:
             pass
         else:
             raise KeyError('this daemon does not contain ' + repr(key))
@@ -260,7 +260,7 @@ class RequestServer(request.Server):
         key = request['name']
         store, key = key.split('.', 1)
 
-        if key in self.store._daemon_items:
+        if key in self.store._daemon_keys:
             pass
         else:
             raise KeyError('this daemon does not contain ' + repr(key))
