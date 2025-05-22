@@ -1,7 +1,9 @@
+import queue
 import time
 
 from . import poll
 from ..client import item
+from . import updater
 
 
 class Daemon:
@@ -9,36 +11,83 @@ class Daemon:
         This supplemental class is intended to be strictly additive to a
         client-side Item class; multiple inheritance is leveraged to allow
         cleaner addition of these methods to not just the base client Item
-        class, but potentially any subclasses as well.
-
-        The default behavior of the daemon-specific methods is to act as a
-        simple key/value cache.
+        class, but potentially any subclasses as well-- for example, a
+        Daemon.Item.Numeric class may benefit from subclassing both this
+        Daemon class as well as Client.Item.Numeric, whereas if Daemon.Item
+        were a simple subclass of Client.Item it would be more challenging
+        to include the additional behavior.
     """
 
     def __init__(self, *args, **kwargs):
-        pass
+        self._daemon_cached = None
+
+        # The _update_* components are a workaround for using the Client
+        # PUB/SUB machinery to trigger local callbacks. Instead, whenever
+        # an item is published a duplicate of the already-formatted message
+        # is put into this simple queue, and a background thread triggers
+        # a call to self._update().
+
+        self._update_queue = queue.SimpleQueue()
+        self._update_thread = updater.Updater(self._update, self._update_queue)
 
     def poll(self, period):
         """ Poll for a new value every *period* seconds. Polling will be
-            discontinued if *period* is set to None or zero.
+            discontinued if *period* is set to None or zero. Requesting a
+            new value is accomplished via the :func:`req_refresh` method.
         """
 
         poll.start(self.req_refresh, period)
 
-    def publish(self, new_value):
-        """ Publish a new value.
+    def publish(self, new_value, bulk=None, timestamp=None, cache=False):
+        """ Publish a new value, which is expected to be a dictionary minimally
+            containing 'asc' and 'bin' keys rerepsenting different views of the
+            new value; bulk values are not represented as a dictionary, they are
+            passed in directly as the *bulk* argument, and the *new_value*
+            argument will be ignored. If *timestamp* is set it is expected to be
+            a UNIX epoch timestamp; the current time will be used if it is not
+            set. If *cache* is set to True the published value will be cached
+            locally for any future requests.
         """
+
+        if timestamp is None:
+            timestamp = time.time()
+        else:
+            timestamp = float(timestamp)
 
         message = dict()
         message['message'] = 'PUB'
         message['name'] = self.full_key
-        message['time'] = time.time()
-        message['data'] = new_value
+        message['time'] = timestamp
 
+        if bulk is None:
+            message['data'] = new_value
+        else:
+            bytes = bulk.tobytes()
+            description = dict()
+            description['shape'] = bulk.shape
+            description['dtype'] = str(bulk.dtype)
+            message['data'] = description
+            message['bulk'] = bytes
+
+            new_value = bulk
+
+        if cache == True:
+            try:
+                self._daemon_cached = new_value['bin']
+            except (TypeError, KeyError, IndexError):
+                self._daemon_cached = new_value
+
+        # The internal update needs a separate copy of the message dictionary,
+        # as its contents relating to bulk messages are manipulated as part of
+        # putting the message out "on the wire". A deep copy is not necessary.
+
+        self._update_queue.put(dict(message))
         self.store.pub.publish(message)
 
     def req_get(self, request):
-        """ Handle a GET request.
+        """ Handle a GET request. A typical subclass should not need to
+            re-implement this method, implementing :func:`req_refresh`
+            would normally be sufficient.
         """
 
         try:
@@ -50,27 +99,39 @@ class Daemon:
             self.req_refresh()
 
         payload = dict()
-        payload['asc'] = self.cached
-        payload['bin'] = self.cached
+
+        try:
+            bytes = self._daemon_cached.tobytes()
+        except AttributeError:
+            payload['asc'] = str(self._daemon_cached)
+            payload['bin'] = self._daemon_cached
+        else:
+            payload['shape'] = self._daemon_cached.shape
+            payload['dtype'] = str(self._daemon_cached.dtype)
+            payload['bulk'] = bytes
 
         return payload
 
     def req_refresh(self):
-        """ Refresh the current value and publish it. This is where a daemon
-            would communicate with a controller or other source-of-authority
-            to retrieve the current value.
+        """ Refresh the current value and publish it. This is the entry point
+            for any calls made via the :func:`poll` machinery, or for any GET
+            requests explicitly requesting a refresh of the current value.
+            Subclasses do not need to call this parent method, they can call
+            :func:`publish` directly with or without the *cache* argument set
+            to True.
         """
 
         # This implementation is strictly caching, there is nothing to refresh.
 
         payload = dict()
-        payload['asc'] = self.cached
-        payload['bin'] = self.cached
+        payload['asc'] = str(self._daemon_cached)
+        payload['bin'] = self._daemon_cached
 
         self.publish(payload)
 
     def req_set(self, request):
-        """ Handle a SET request.
+        """ Handle a client-initiated SET request. Any calls to :func:`req_set`
+            are expected to block until completion of the request.
         """
 
         try:
@@ -83,7 +144,7 @@ class Daemon:
             new_value = self._interpret_bulk(request)
 
         new_value = self.validate(new_value)
-        self.cached = new_value
+        self._daemon_cached = new_value
 
         publish = dict()
 
@@ -91,7 +152,7 @@ class Daemon:
             publish['data'] = request['data']
             publish['bulk'] = request['bulk']
         else:
-            publish['asc'] = new_value
+            publish['asc'] = str(new_value)
             publish['bin'] = new_value
 
         self.publish(publish)
@@ -118,10 +179,21 @@ class Daemon:
 # end of class daemon
 
 
-class Item(item.Item, Daemon):
-    """ The daemon version of a `class:client.Item` is based on the client
-        version, implementing additional methods that are relevant in a daemon
-        context, but with all other client behavior left unchanged.
+
+# For the final Item class, the Daemon class is inheritedfirst because we want
+# it to override some behavior of the Client.Item class. Subclasses should be
+# careful to continue this pattern; the initialization, however, invokes the
+# Client.Item code first, and then the Daemon code; this is likewise deliberate,
+# so that the Daemon initialization can override steps taken during the
+# Client.Item intialization.
+
+
+class Item(Daemon, item.Item):
+    """ This daemon-specific subclass of a :class:`mKTL.Client.Item` implements
+        additional methods that are relevant in a daemon context, but with all
+        client behavior left unchanged. For example, if a callback is registered
+        with this :class:`Item` instance, it is handled precisely the same way
+        as if this were a regular :class:`mKTL.Client.Item` instance.
     """
 
     def __init__(self, *args, **kwargs):

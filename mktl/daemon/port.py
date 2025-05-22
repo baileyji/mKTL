@@ -87,7 +87,9 @@ def used():
     targets = list()
     targets.append(port_directory)
 
-    if not os.path.exists(port_directory):
+    if os.path.exists(port_directory):
+        pass
+    else:
         return ports
 
     for target in targets:

@@ -1,7 +1,10 @@
+
 import threading
 import time
 
-from . import subprocess
+from ..config import file as config_file
+from ..daemon import store as daemon_store
+from ..daemon import item as daemon_item
 
 try:
     import ktl
@@ -9,72 +12,48 @@ except ModuleNotFoundError:
     ktl = None
 
 
-class KTL(subprocess.Base):
+class Store(daemon_store.Store):
 
-    def __init__(self, req, pub, name):
+    def __init__(self, name, *args, **kwargs):
 
         if ktl is None:
             raise ModuleNotFoundError("cannot import the 'ktl' module")
 
-        self.name = name
-        #TODO this should likely be super()
-        subprocess.Base.__init__(self, req, pub)
+        # Generate the configuration matching this KTL service. The base
+        # Daemon.Store will want to know where it can be loaded from, and
+        # it is always loading from a location on disk-- so we need to save
+        # it first. This bit of indirection is only necessary because we
+        # are generating the configuration at runtime.
 
-        service = ktl.cache(name)
+        items = describeService(name)
+        config_file.save_daemon(name, name, items)
 
-        for name in service:
-            keyword = service[name]
+        daemon_store.Store.__init__(self, name, name)
+
+
+    def setup(self):
+
+        config = self.daemon_config[self.daemon_uuid]
+        items = self.daemon_config[self.daemon_uuid]['items']
+        keys = items.keys()
+
+        for key in keys:
+            Item(self, key)
+
+
+    def setup_final(self):
+        """ This is the last step before broadcasts go out. This is the
+            right time to fire up monitoring of all KTL keywords.
+        """
+
+        service = ktl.cache(self.name)
+
+        for keyword in service:
 
             if keyword['broadcasts'] == True:
                 keyword.callback(self.relay)
                 keyword.monitor(wait=False)
 
-    def req_config(self, request):
-        uuid = self.uuid('ktl.' + self.name)
-
-        configuration = dict()
-        configuration['name'] = self.name
-        configuration['uuid'] = uuid
-        configuration['time'] = time.time()
-        configuration['keys'] = describe_service(self.name)
-        hash = self.hash(configuration['keys'])
-        configuration['hash'] = hash
-
-        return configuration
-
-    def req_get(self, request):
-        name = request['name']
-        keyword = ktl.cache(name)
-
-        try:
-            refresh = request['refresh']
-        except KeyError:
-            refresh = False
-        else:
-            if refresh == None or refresh == '':
-                refresh = False
-
-        if keyword['monitored'] != True or refresh == True:
-            keyword.read()
-
-        slice = keyword.history[-1]
-        timestamp = slice.time
-        ascii = slice.ascii
-        binary = slice.binary
-
-        payload = dict()
-        payload['asc'] = ascii
-        payload['bin'] = binary
-
-        return payload
-
-    def req_set(self, request):
-
-        name = request['name']
-        keyword = ktl.cache(name)
-
-        new_value = request['data']
-        keyword.write(new_value)
 
     def relay(self, keyword):
 
@@ -91,19 +70,54 @@ class KTL(subprocess.Base):
         payload['asc'] = ascii
         payload['bin'] = binary
 
-        broadcast = dict()
-        broadcast['message'] = 'PUB'
-        broadcast['time'] = timestamp
-        broadcast['name'] = keyword.full_name
-        broadcast['data'] = payload
-
-        self.publish(broadcast)
+        key = keyword.name
+        item = self._items[key]
+        item.publish(payload, timestamp=timestamp, cache=True)
 
 
-# end of class KTL
+# end of class Store
 
 
-def describe_service(name):
+
+class Item(daemon_item.Item):
+
+
+    def req_refresh(self):
+
+        keyword = ktl.cache(self.key)
+        keyword.read()
+
+        slice = keyword.history[-1]
+        timestamp = slice.time
+        ascii = slice.ascii
+        binary = slice.binary
+
+        payload = dict()
+        payload['asc'] = ascii
+        payload['bin'] = binary
+
+        return payload
+
+
+    def req_set(self, request):
+
+        name = request['name']
+        keyword = ktl.cache(name)
+
+        new_value = request['data']
+        keyword.write(new_value)
+
+        # Returning True here acknowledges that the request is complete.
+
+        payload = dict()
+        payload['data'] = True
+        return payload
+
+
+# end of class Item
+
+
+def describeService(name):
     service = ktl.cache(name)
 
     keywords = dict()
@@ -111,13 +125,13 @@ def describe_service(name):
         # The KTL.Service iterates in alphabetical order, there is no need
         # for additional sorting in order for it to be predictable and/or
         # repeatable.
-        keyword_dict = describe_keyword(keyword)
+        keyword_dict = describeKeyword(keyword)
         keywords[keyword.name] = keyword_dict
 
     return keywords
 
 
-def describe_keyword(keyword):
+def describeKeyword(keyword):
     keyword_dict = dict()
 
     type = keyword['type']
@@ -131,8 +145,8 @@ def describe_keyword(keyword):
     else:
         rebuilt = dict()
         if type == 'mask':
-            rebuilt['None'] = enumerators[0]
-            enumerators = enumerators[1:]
+           rebuilt['None'] = enumerators[0]
+           enumerators = enumerators[1:]
         for key in range(len(enumerators)):
             enumerator = enumerators[key]
             if enumerator == '':
@@ -218,5 +232,6 @@ type_mapping['KTL_INT_ARRAY'] = 'numeric array'
 type_mapping['KTL_INT'] = 'numeric'
 type_mapping['KTL_MASK'] = 'mask'
 type_mapping['KTL_STRING'] = 'string'
+
 
 # vim: set expandtab tabstop=8 softtabstop=4 shiftwidth=4 autoindent:

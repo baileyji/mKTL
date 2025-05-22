@@ -36,7 +36,7 @@ def directory():
 directory.found = None
 
 
-def load(name, specific=None):
+def load(store, specific=None):
     """ Load the configuration for the specified store name. If *specific* is
         not None, it is expected to be the unique string corresponding to a
         single configuration file, either a unique string of the caller's
@@ -46,8 +46,10 @@ def load(name, specific=None):
         are fully parsed from their on-disk JSON format.
     """
 
+    store = store.lower()
+
     if specific is not None:
-        return load_one(name, specific)
+        return load_one(store, specific)
 
     base_directory = directory()
 
@@ -58,12 +60,12 @@ def load(name, specific=None):
     # will know what it is looking for and provide a 'specific' argument.
     # The remaining checks here will ignore the daemon directory.
 
-    cache_directory = os.path.join(base_directory, 'client', 'cache', name)
+    cache_directory = os.path.join(base_directory, 'client', 'cache', store)
 
     if os.path.isdir(cache_directory):
         pass
     else:
-        raise ValueError('no locally stored configuration for ' + repr(name))
+        raise ValueError('no locally stored configuration for ' + repr(store))
 
     files = list()
 
@@ -78,7 +80,7 @@ def load(name, specific=None):
 
     results = dict()
     for file in files:
-        loaded = load_one(name, file)
+        loaded = load_one(store, file)
         new_uuid = list(loaded.keys())[0]
         results.update(loaded)
 
@@ -123,11 +125,7 @@ def load_daemon(store, filename):
     configuration = dict()
 
     raw_json = open(filename, 'r').read()
-    try:
-        items = json.loads(raw_json)
-    except:
-        print(repr(raw_json))
-        raise
+    items = json.loads(raw_json)
 
     configuration['name'] = store
     configuration['uuid'] = target_uuid
@@ -145,6 +143,8 @@ def load_one(store, specific):
         it is assumed the caller knows exactly which file they want, and have
         provided the full and correct path.
     """
+
+    store = store.lower()
 
     # Some of these checks are redundant if we got here via the load() method,
     # but it's unavoidable that we need the information in both places.
@@ -204,13 +204,11 @@ def remove(store, uuid):
         pass
 
 
-def save(name, configuration):
+def save(store, configuration):
     """ Save a configuration block to the cache directory. There are no
-        provisions here for saving to the local directory, which is where
+        provisions here for saving to the daemon directory, which is where
         configuration contents would be populated for an authoritative daemon.
     """
-
-    base_directory = directory()
 
     try:
         configuration['name']
@@ -219,7 +217,7 @@ def save(name, configuration):
         # get from config.Cache.
         for uuid in configuration.keys():
             block = configuration[uuid]
-            save(name, block)
+            save(store, block)
         return
 
     try:
@@ -231,7 +229,7 @@ def save(name, configuration):
     base_filename = block_uuid
     json_filename = base_filename + '.json'
 
-    cache_directory = os.path.join(base_directory, 'client', 'cache', name)
+    cache_directory = os.path.join(base_directory, 'client', 'cache', store)
 
     if os.path.exists(cache_directory):
         pass
@@ -255,5 +253,46 @@ def save(name, configuration):
     writer.close()
 
     os.chmod(target_filename, 0o664)
+
+
+
+def save_daemon(store, specific, configuration):
+    """ Save a configuration block to the daemon directory. This is only
+        relevant if a daemon is generating its configuration at runtime,
+        or as an entry point for external tools that generate the configuration
+        contents and want it stored in the correct location.
+
+        The *configuration* should be a dictionary of items, matching the
+        expected structure of the daemon-side configuration contents.
+    """
+
+    base_directory = directory()
+    json_filename = specific + '.json'
+
+    daemon_directory = os.path.join(base_directory, 'daemon', 'store', store)
+
+    if os.path.exists(daemon_directory):
+        pass
+    else:
+        os.makedirs(daemon_directory, mode=0o775)
+
+    if os.access(daemon_directory, os.W_OK) != True:
+        raise OSError('cannot write to daemon directory: ' + daemon_directory)
+
+    raw_json = json.dumps(configuration)
+
+    target_filename = os.path.join(daemon_directory, json_filename)
+
+    try:
+        os.remove(target_filename)
+    except FileNotFoundError:
+        pass
+
+    writer = open(target_filename, 'wb')
+    writer.write(raw_json)
+    writer.close()
+
+    os.chmod(target_filename, 0o664)
+
 
 # vim: set expandtab tabstop=8 softtabstop=4 shiftwidth=4 autoindent:

@@ -134,12 +134,12 @@ class Item:
     def set(self, new_value, wait=True, bulk=None):
         """ Set a new value. Set *wait* to True to block until the request
             completes; this is the default behavior. If *wait* is set to False,
-            the caller will be returned a :class:`Request.Pending` instance,
-            which has a :func:`Request.Pending.wait` method that can optionally
-            be invoked block until completion of the request; the wait will
-            return immediately once the request is satisfied. There is no
-            return value for a blocking request; failed requests will raise
-            exceptions.
+            the caller will be returned a :class:`Protocol.Request.Pending`
+            instance, which has a :func:`Protocol.Request.Pending.wait` method
+            that can optionally be invoked block until completion of the
+            request; the wait will return immediately once the request is
+            satisfied. There is no return value for a blocking request; failed
+            requests will raise exceptions.
 
             If *bulk* is set to anything it should be an as-bytes representation
             of the new value; the *new_value* component should be a dictionary
@@ -159,7 +159,7 @@ class Item:
 
         pending = self.req.send(request)
 
-        if wait == False:
+        if not wait:
             return pending
 
         response = pending.wait(self.timeout)
@@ -181,7 +181,9 @@ class Item:
 
                 ### The exception type here should be something unique
                 ### instead of a RuntimeError.
-                raise RuntimeError("SET failed: %s: %s" % (e_type, e_text))
+                error = "SET of %s failed: %s: %s" % (self.key, e_type, e_text)
+                raise RuntimeError(error)
+            return response #TODO this may be an incorrect bugfix -JIB
 
     def subscribe(self, prime=True):
         """ Subscribe to all future broadcast events. Doing so ensures that

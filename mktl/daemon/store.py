@@ -26,16 +26,20 @@ class Store(store.Store):
         be loaded that supplements the client behavior with daemon-specific
         functionality.
 
-        The developer is expected to subclass this :class:`Store` class and
-        implement a :func:`setup` method. :func:`setup`* will be called near
-        the end of the initialization process, once most of the local
-        infrastructure has been established, but before all of the local Items
-        have been instantiated. :func:`setup` is a hook allowing the subclass
-        to instantiate custom Item classes, and make any other custom supporting
-        calls as part of the initialization.
+        The developer is expected to subclass :class:`Store` class and
+        implement a :func:`setup` method, and/or a :func:`setup_final`
+        method.
+
+        The *store* argument is the name of this store; *config* is the base
+        name of the mKTL configuration file that defines the items in this
+        store. *arguments* is expected to be an :class:`argparse.ArgumentParser`
+        instance, though in practice it can be any Python object with specific
+        named attributes of interest to a :class:`Store` subclass; it is not
+        required. This is intended to be a vehicle for subclasses to receive
+        key information from command-line arguments.
     """
 
-    def __init__(self, name, cfg):
+    def __init__(self, name, config, arguments=None):
 
         self.name = name
         self.config = None
@@ -47,12 +51,21 @@ class Store(store.Store):
         daemon_config = file.load(name, cfg)
         self._update_daemon_config(daemon_config)
 
-        # Use cached port numbers when possible.
+        # Use cached port numbers when possible. The ZMQError is thrown
+        # when the requested port is not available; let a new one be
+        # auto-assigned when that happens.
 
         req, pub = port.load(self.name, self.daemon_uuid)
 
-        self.pub = publish.Server(port=pub, avoid=port.used())
-        self.req = RequestServer(self, port=req, avoid=port.used())
+        try:
+            self.pub = publish.Server(port=pub, avoid=port.used())
+        except zmq.error.ZMQError:
+            self.pub = publish.Server(port=None, avoid=port.used())
+
+        try:
+            self.req = RequestServer(self, port=req, avoid=port.used())
+        except zmq.error.ZMQError:
+            self.req = RequestServer(self, port=None, avoid=port.used())
 
         port.save(self.name, self.daemon_uuid, self.req.port, self.pub.port)
 
@@ -83,13 +96,20 @@ class Store(store.Store):
         # before filling in with empty caching Item classes.
 
         self.setup()
-        self.setupRemaining()
+        self._setup_missing()
 
         # Restore any persistent values, and enable the retention of future
-        # persistent values.
+        # persistent values. If there are no persistent items present in this
+        # store the call to _restore() is a no-op, and the persistence
+        # subprocess will exit.
 
         self._restore()
         self._begin_persistence()
+
+        # The promise is that setup_final() gets invoked after everything else
+        # is ready, but before we go on the air.
+
+        self.setup_final()
 
         # Ready to go on the air.
 
@@ -170,15 +190,20 @@ class Store(store.Store):
 
     def setup(self):
         """ Subclasses should override the :func:`setup` method to instantiate
-            any local Item classes or otherwise execute custom code that needs
-            to occur as part of establishing this Store instance.
+            any custom :class:`Item` subclasses or otherwise execute custom
+            code. When :func:`setup` is called the bulk of the :class:`Store`
+            machinery is in place, but cached values have not been loaded, nor
+            has the presence of this daemon been announced. The default
+            implementation of this method takes no actions.
         """
 
-        raise NotImplementedError('subclass must define a setup() method')
+        pass
 
-    def setupRemaining(self):
-        """ Provision any unset local Item instances with caching
-            implementations.
+
+    def _setup_missing(self):
+        """ Inspect the locally known list of :class:`Item` instances; create
+            default, caching instances for any that were not previously
+            populated by the call to :func:`setup`.
         """
 
         local = list(self._daemon_keys)
@@ -189,6 +214,18 @@ class Store(store.Store):
             if x is None:
                 x = item.Item(self, key)
                 self._items[key] = x
+
+
+    def setup_final(self):
+        """ Subclasses should override the :func:`setup_final` method to
+            execute any/all code that should occur after all :class:`Item`
+            instances have been created, including any non-custom :class:`Item`
+            instances, but before this :class:`Store` announces its availability
+            on the local network. The default implementation of this method
+            takes no actions.
+        """
+
+        pass
 
 
 # end of class Store

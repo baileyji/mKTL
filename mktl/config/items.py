@@ -6,7 +6,7 @@ from . import hash as config_hash  # Don't shadow hash()
 
 
 _cache = dict()
-hashes = dict()
+_hashes = dict()
 
 
 def get(store):
@@ -23,7 +23,7 @@ def get(store):
     except KeyError:
         pass
     else:
-        if hashes[store] == config_hash.get(store):
+        if _hashes[store] == config_hash.get(store):
             return cached
 
     config = cache.get(store)
@@ -50,7 +50,7 @@ def get(store):
 
             by_key[key] = copied
 
-    hashes[store] = config_hash.get(store)
+    _hashes[store] = config_hash.get(store)
     _cache[store] = by_key
 
     return by_key
@@ -66,7 +66,7 @@ def clear(store):
         pass
 
     try:
-        del hashes[store]
+        del _hashes[store]
     except KeyError:
         pass
 

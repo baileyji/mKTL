@@ -1,7 +1,6 @@
 """ Routines to handle provenance information.
 """
 
-
 def add(block, hostname, req, pub=None):
     """ Add the provenance of this daemon to the supplied configuration
         block. The block is provided as a Python dictionary; the hostname
