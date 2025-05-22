@@ -470,7 +470,7 @@ class MKTLComs:
         return destination
 
     def _send_request(self, msg_type: str, key: str, payload: dict, timeout: float, binary_blob: Optional[bytes] = None,
-                      destination: Optional[UUID] = None) -> MKTLMessage:
+                      destination: Optional[MKTLPeer] = None) -> MKTLMessage:
         """
         Build and transmit a control request to another node, blocking for response.
 
@@ -489,7 +489,7 @@ class MKTLComs:
             key=key,
             json_data=payload,
             binary_blob=binary_blob,
-            destination=destination
+            destination=destination.uuid if destination else None
         )
         self._pending_replies[req_id] = None
         self._send_queue.put(m)
@@ -829,6 +829,7 @@ class MKTLComs:
         Args:
             key: The fully-qualified mKTL key to retrieve.
             timeout: Timeout in seconds for the operation.
+            payload: Optional payload to send.
             destination: Optional identity override for direct routing.
 
         Returns:
@@ -836,9 +837,9 @@ class MKTLComs:
         """
         getLogger(__name__).debug(f"Initiating 'get' request for key={key}, destination={destination}")
         resolved = self._resolve_destination(key, destination)
-        return self._send_request('get', key, payload or {}, timeout, None, UUID)
+        return self._send_request('get', key, payload or {}, timeout, None, destination=resolved)
 
-    def set(self, key: str, value: Any, timeout: float = 2000.0, binary_blob: Optional[bytes] = None,
+    def set(self, key: str, value: Any=None, timeout: float = 2000.0, binary_blob: Optional[bytes] = None,
             destination: Optional[str] = None) -> MKTLMessage:
         """
         Send a `set` request with a value and optional binary payload.
@@ -856,6 +857,8 @@ class MKTLComs:
         Returns:
             A tuple (value, binary_blob) from the response.
         """
+        if value is None:
+            value = dict(args=tuple())
         getLogger(__name__).debug(f"Initiating 'set' request for key={key}, value={value}, destination={destination}")
         resolved = self._resolve_destination(key, destination)
         return self._send_request('set', key, value, timeout, binary_blob, destination=resolved)
