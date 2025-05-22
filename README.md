@@ -1,3 +1,5 @@
+Note that this repo is a bit of a mess we are attempting to sync with other development.
+
 mKTL is intended to be the successor to the Keck Task Library (KTL)
 applications programming interface (API) at W. M. Keck Observatory (WMKO).
 The goal of KTL is to standardize interprocess communications, providing a
