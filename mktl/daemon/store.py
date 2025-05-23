@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import zmq
@@ -48,7 +49,7 @@ class Store(store.Store):
         self.daemon_uuid = None
         self._daemon_keys = set()
 
-        daemon_config = file.load(name, cfg)
+        daemon_config = file.load(name, config)
         self._update_daemon_config(daemon_config)
 
         # Use cached port numbers when possible. The ZMQError is thrown
@@ -123,11 +124,13 @@ class Store(store.Store):
             persistent value cache.
         """
 
-        ### This is not a valid way to find the markpersistd executable.
+        daemon = sys.argv[0]
+        dirname = os.path.dirname(daemon)
+        markpersistd = os.path.join(dirname, 'markpersistd')
 
         arguments = list()
-        binfile = os.path.join(str(importlib.resources.files('mktl')), '../python/bin/markpersistd')
-        arguments.append(binfile)
+        arguments.append(sys.executable)
+        arguments.append(markpersistd)
         arguments.append(self.name)
         arguments.append(self.daemon_uuid)
         print(arguments)
