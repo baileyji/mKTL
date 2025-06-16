@@ -101,7 +101,10 @@ class Daemon:
     def req_get(self, request):
         """ Handle a GET request. A typical subclass should not need to
             re-implement this method, implementing :func:`req_refresh`
-            would normally be sufficient.
+            would normally be sufficient. The *request* argument is a
+            Python dictionary, parsed from the inbound JSON-formatted
+            request. The value returned from :func:`req_get` is identical
+            to the value returned by :func:`req_refresh`.
         """
 
         try:
@@ -138,10 +141,18 @@ class Daemon:
 
 
     def req_poll(self):
-        """ Entry point for calls originating from :func:`poll`. The only reason
-            this method exists is to streamline the expected behavior of
-            :func:`req_refresh`; a typical subclass would not need to
-            reimplement this method.
+        """ Entry point for calls originating from :func:`poll`; a typical
+            subclass should not need to reimplement this method. The main reason
+            :func:`req_poll` exists is to streamline the expected behavior of
+            :func:`req_refresh`, allowing it to focus entirely on what it means
+            to acquire a new value; after receiving the refreshed value,
+            :func:`req_poll` will additionally publish the new value. A common
+            pattern for custom subclasses involves registering :func:`req_poll`
+            as a callback on other items, so that the local value of this item
+            can be refreshed when events occur elsewhere within a daemon.
+
+            For convenience, the value returned from :func:`req_poll` is
+            identical to the value returned by :func:`req_refresh`.
         """
 
         payload = self.req_refresh()
@@ -165,7 +176,7 @@ class Daemon:
             and return it to the caller. The return value is a dictionary,
             nominally with 'asc' and 'bin' keys, representing a human-readable
             format ('asc') format, and a Python binary representation of the
-            same value. For example, {'asc': 'On', 'bin': True}.
+            same value. For example, ``{'asc': 'On', 'bin': True}``.
 
             Bulk values are returned solely as a numpy array. Other return
             values are in theory possible, as long as the request and publish
@@ -184,7 +195,14 @@ class Daemon:
 
     def req_set(self, request):
         """ Handle a client-initiated SET request. Any calls to :func:`req_set`
-            are expected to block until completion of the request.
+            are expected to block until completion of the request; no return
+            value of significance is expected, though one can be provided (in
+            dictionary form, with the response in the 'data' field) if desired.
+            Any errors should be indicated by raising an exception.
+
+            The *request* is passed in as a dictionary; the only two fields of
+            immediate relevance are the 'data' and optionally the 'bulk' fields,
+            which indicate the new value the client would like to set.
         """
 
         try:
@@ -210,11 +228,9 @@ class Daemon:
 
         self.publish(publish)
 
-        # Returning True here acknowledges that the request is complete.
-
-        payload = dict()
-        payload['data'] = True
-        return payload
+        # If req_set() returns a payload it will be returned to the caller;
+        # absent any explicit response (not required, nor expected), a default
+        # response will be provided.
 
     def validate(self, value):
         """ A hook for a daemon to validate a new value. The default behavior

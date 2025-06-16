@@ -37,7 +37,9 @@ class Store(store.Store):
         instance, though in practice it can be any Python object with specific
         named attributes of interest to a :class:`Store` subclass; it is not
         required. This is intended to be a vehicle for subclasses to receive
-        key information from command-line arguments.
+        key information from command-line arguments, such as the location of
+        an auxiliary configuration file containing information about a hardware
+        controller.
     """
 
     def __init__(self, name, config, arguments=None):
@@ -273,6 +275,9 @@ class RequestServer(request.Server):
             payload = self.req_hash(request)
         elif type == 'SET':
             payload = self.req_set(request)
+            if payload is None:
+                payload = dict()
+                payload['data'] = True
         elif type == 'GET':
             payload = self.req_get(request)
         elif type == 'CONFIG':

@@ -122,8 +122,9 @@ class Item:
     def register(self, method):
         """ Register a callback to be invoked whenever a new value is received,
             either by a direct :func:`get` request or the arrival of an
-            asynchronous broadcast. :func:`subscribe` will be invoked if
-            a subscription has not already occurred.
+            asynchronous broadcast. :func:`subscribe` will automatically be
+            invoked as necessary, the client does not need to call it
+            separately.
         """
 
         if callable(method):
@@ -140,9 +141,9 @@ class Item:
     def set(self, new_value, wait=True, bulk=None):
         """ Set a new value. Set *wait* to True to block until the request
             completes; this is the default behavior. If *wait* is set to False,
-            the caller will be returned a :class:`Protocol.Request.Pending`
-            instance, which has a :func:`Protocol.Request.Pending.wait` method
-            that can optionally be invoked block until completion of the
+            the caller will be returned a :class:`mKTL.Protocol.Request.Pending`
+            instance, which has a :func:`mKTL.Protocol.Request.Pending.wait`
+            method that can optionally be invoked block until completion of the
             request; the wait will return immediately once the request is
             satisfied. There is no return value for a blocking request; failed
             requests will raise exceptions.
@@ -152,7 +153,9 @@ class Item:
             providing whatever metadata is required to appropriately handle
             the as-bytes representation; for example, if a numpy array is being
             transmitted, the *new_value* dictionary will need to include the
-            dimensions of the array as well as its data type.
+            dimensions of the array as well as its data type; in that specific
+            case, the expected keys in the dictionary are the 'shape' of the
+            numpy array, and the string representation of the dtype attribute.
         """
 
         request = dict()

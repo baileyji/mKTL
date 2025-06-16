@@ -6,7 +6,8 @@ class Store:
     """ The :class:`Store` implements a key/value store, effectively a Python
         dictionary with some additional context. A store has a unique *name*
         within the local mKTL context; which daemons will be contacted to handle
-        further requests is determined by the per-Item configuration.
+        further requests is determined on a per-Item basis, re-use of
+        connections is managed in the :mod:`mKTL.Protocol` submodule, not here.
     """
 
     def __init__(self, name):
@@ -35,7 +36,11 @@ class Store:
         raise NotImplementedError('you cannot assign a key to a Store directly')
 
     def __getitem__(self, key):
-        x = self._items[key]
+        try:
+            x = self._items[key]
+        except KeyError:
+            error = "'%s' does not contain the key '%s'" % (self.name, key)
+            raise KeyError(error)
 
         if x is None:
             x = item.Item(self, key)

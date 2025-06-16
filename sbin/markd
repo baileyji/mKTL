@@ -2,16 +2,19 @@
 
 description = '''
 This is a generic mKTL daemon. The real work is done in the subclass of
-Daemon.Store (if any); this body of code parses command line flags and a
-configuration file (if any), and listens for any subsequent requests.
+Daemon.Store (if any); this executable parses command-line flags, invokes
+a Daemon.Store instance to handle any/all requests, and otherwise waits
+until the program is terminated.
 
 The store name and configuration identifier must be specified in order
 for this daemon to function correctly; all other arguments are optional.
 '''
 
 epilog = '''
-For example, to run markd for the store 'rosebud', using the on-disk
-configuration identified as 'innocence', one might invoke:
+For example, to run markd for the store 'rosebud', using the existing
+on-disk configuration identified as 'innocence', first using the default
+caching implementation, and then with a custom Kane.Sled subclass of
+Daemon.Store, one might invoke:
 
     markd rosebud innocence
     markd rosebud innocence --module Kane --subclass Sled
@@ -40,8 +43,6 @@ main.shutdown = threading.Event()
 
 def parse_command_line():
 
-    # Start with command-line arguments.
-
     arguments = dict()
     arguments['formatter_class'] = argparse.RawDescriptionHelpFormatter
     arguments['description'] = description
@@ -49,29 +50,56 @@ def parse_command_line():
 
     parser = argparse.ArgumentParser(**arguments)
 
-    parser.add_argument('store', help='Name of the mKTL store')
-    parser.add_argument('identifier', help='Unique identifier for mKTL configuration')
+    parser.add_argument('store', help='Name of this mKTL store.')
+    parser.add_argument('identifier', help='Unique identifier for the mKTL configuration associated with this specific daemon; this is an arbitrary string, and must be unique for this daemon within this store.')
 
-    parser.add_argument('-m', '--module', help='Module that must be imported to support --subclass option', default='mKTL.Daemon')
-    parser.add_argument('-s', '--subclass', help='Specific Daemon.Store subclass to invoke', default='Store')
-    parser.add_argument('-c', '--config', help='Custom configuration file (not used directly by mKTL)')
+    parser.add_argument('-m', '--module', help='Module to import which contains the Daemon.Store subclass to invoke.', default='mKTL.Daemon')
+    parser.add_argument('-s', '--subclass', help='Specific Daemon.Store subclass to invoke; this is the bare class name (Store), not a fully qualified class name (mKTL.Daemon.Store).', default='Store')
+    parser.add_argument('-c', '--configuration', help='File containing daemon-specific mKTL configuration of items; if specified, the contents of this file will supplant any cached daemon-specific configuration for this identifier.')
+    parser.add_argument('-a', '--appconfig', help='Custom configuration file location, not used directly by mKTL, but made available to the Daemon.Store subclass. How this directive is used is entirely up to the application-specific subclass code.')
 
 
     parsed = parser.parse_args()
     return parsed
 
 
+def load_configuration(store, identifier, filename):
+    """ Pre-load the user-specified mKTL configuration; this is expected to
+        be a JSON-formatted description of a sequence of items, as defined
+        in the configuration syntax section of the mKTL documentation:
+
+        https://keckobservatory.github.io/mKTL/configuration.html#storage
+
+        Allowing the caller to specify the location of this file prevents
+        the need for tight coupling between mKTL's configuration storage
+        scheme and any external configuration management scheme employed
+        by the caller.
+    """
+
+    # The mKTL import is here (as opposed to the top of the script) to allow
+    # running this executable in contexts where the mKTL module may not be
+    # on the default search path.
+    import mktl.protocol.json
+    import mktl.config.file
+
+    contents = open(filename, 'r').read()
+    items = mktl.protocol.json.loads(contents)
+    mktl.config.file.save_daemon(store, identifier, items)
+
 def start_store(config):
     store = config.store
     config_id = config.identifier
+
+    if config.configuration is not None:
+        load_configuration(store, config_id, config.configuration)
 
     custom_module = None
     custom_store = None
 
     if config.module == 'mktl.daemon':
-        # The mKTL import is here to allow running this executable in contexts
-        # where the mKTL module may not be on the default search path. Only in
-        # this condition is it specifically required.
+        # The mKTL import is here (as opposed to the top of the script) to allow
+        # running this executable in contexts where the mKTL module may not be
+        # on the default search path.
         import mktl.daemon as store_module
     else:
         store_module = importlib.import_module(config.module)

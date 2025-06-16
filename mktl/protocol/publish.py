@@ -115,7 +115,7 @@ class Client:
             processing all arriving broadcast messages.
 
             :func:`subscribe` will be invoked for any/all topics registered
-            with a callback.
+            with a callback, it does not need to be called separately.
         """
 
         if callable(callback):
@@ -230,8 +230,9 @@ class Client:
 
         # self.socket.setsockopt(zmq.SUBSCRIBE, b'bulk:' + topic)
 
-        # The conditional need for this additional subscribtion is handled
-        # in the Item class, specifically, Item.subscribe().
+        # The conditional need for this additional 'bulk' subscribtion is
+        # handled in the Item class, specifically, Item.subscribe(), since
+        # it knows whether the additional subscription is necessary.
 
 
 # end of class client
@@ -243,6 +244,11 @@ class Server:
         available automatically assigned port. The *avoid* set enumerates port
         numbers that should not be automatically assigned; this is ignored if a
         fixed *port* is specified.
+
+        The port variables associated with a :class:`Server` instance is a key
+        pieces of the provenance for an mKTL daemon.
+
+        :ivar port: The port on which this server is listening for connections.
     """
 
     pub_id_min = 0
@@ -251,7 +257,7 @@ class Server:
     def __init__(self, port=None, avoid=set()):
 
         self.pub_id_lock = threading.Lock()
-        self.pub_id_reset()
+        self._pub_id_reset()
 
         self.socket = zmq_context.socket(zmq.PUB)
 
@@ -312,7 +318,7 @@ class Server:
 
         self.port = trial
 
-    def pub_id_next(self):
+    def _pub_id_next(self):
         """ Return the next publication identification number for subroutines to
             use when constructing a broadcast message.
         """
@@ -321,7 +327,7 @@ class Server:
         pub_id = next(self.pub_id)
 
         if pub_id >= self.pub_id_max:
-            self.pub_id_reset()
+            self._pub_id_reset()
 
             if pub_id > self.pub_id_max:
                 # This shouldn't happen, but here we are...
@@ -331,7 +337,7 @@ class Server:
         self.pub_id_lock.release()
         return pub_id
 
-    def pub_id_reset(self):
+    def _pub_id_reset(self):
         """ Reset the publication identification number to the minimum value.
         """
 
@@ -339,15 +345,22 @@ class Server:
 
     def publish(self, message):
         """ A *message* is a Python dictionary ready to be converted to a
-            JSON byte string and broadcast.
+            JSON byte string and broadcast to any subscribers. The topic for
+            the encoded message will be the 'name' field of the dictionary.
+            The *message* dictionary will be modified by this method, callers
+            should not assume fields are unchanged.
 
             The 'id' field in the *message*, if specified, will be overwritten.
 
             If the 'bulk' field is present in the *message* it must be a byte
             sequence, and will be sent as a separate message to any listeners.
+            The 'bulk' field will be removed and sent as a separate message,
+            with the reference inside the *message* replaced by True, as an
+            indicator to any recipients that they should look for the second
+            message containing the bulk data.
         """
 
-        pub_id = self.pub_id_next()
+        pub_id = self._pub_id_next()
         topic = message['name']
 
         message['id'] = pub_id
@@ -380,7 +393,8 @@ client_connections = dict()
 
 
 def client(address, port):
-    """ Factory function for a :class:`client` instance.
+    """ Factory function for a :class:`client` instance. Use of this method is
+        encouraged to streamline re-use of established connections.
     """
 
     try:

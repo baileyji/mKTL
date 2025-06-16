@@ -34,7 +34,7 @@ class Client:
 
         self.req_id = None
         self.req_id_lock = threading.Lock()
-        self.req_id_reset()
+        self._req_id_reset()
 
         port = int(port)
         self.port = port
@@ -54,7 +54,7 @@ class Client:
         self.pending_thread.daemon = True
         self.pending_thread.start()
 
-    def req_id_next(self):
+    def _req_id_next(self):
         """ Return the next request identification number for subroutines to
             use when constructing a request.
         """
@@ -63,7 +63,7 @@ class Client:
         req_id = next(self.req_id)
 
         if req_id >= self.req_id_max:
-            self.req_id_reset()
+            self._req_id_reset()
 
             if req_id > self.req_id_max:
                 # This shouldn't happen, but here we are...
@@ -73,7 +73,7 @@ class Client:
         self.req_id_lock.release()
         return req_id
 
-    def req_id_reset(self):
+    def _req_id_reset(self):
         """ Reset the request identification number to the minimum value.
         """
 
@@ -103,7 +103,7 @@ class Client:
                             # No further processing required.
                             continue
 
-                        pending.partial(bulk=bulk)
+                        pending._partial(bulk=bulk)
                         continue
 
                     # All other responses are expected to be JSON.
@@ -119,7 +119,7 @@ class Client:
 
                     response_type = response_dict['message']
                     if response_type == 'ACK':
-                        pending.complete_ack(response_dict)
+                        pending._complete_ack(response_dict)
                     else:
                         try:
                             bulk = response_dict['bulk']
@@ -127,16 +127,16 @@ class Client:
                             bulk = False
 
                         if bulk == True:
-                            done = pending.partial(response=response_dict)
+                            done = pending._partial(response=response_dict)
                             if done == True:
                                 del self.pending[response_id]
                         else:
-                            pending.complete(response_dict)
+                            pending._complete(response_dict)
                             del self.pending[response_id]
 
     def send(self, request, response=True):
         """ A *request* is a Python dictionary ready to be converted to a JSON
-            byte string and sent to the connected server. If *response* is True
+            byte string and sent to the receiving server. If *response* is True
             a :class:`Pending` instance will be returned that a client can use
             to wait on for further notification. Set *response* to any other
             value to indicate a return response is not of interest.
@@ -144,11 +144,11 @@ class Client:
             The 'id' field in the *request*, if specified, will be overwritten.
 
             If the 'bulk' field is present in the *request* it must be a byte
-            sequence, and will be sent as a separate message to the connected
-            daemon.
+            sequence; bulk data is transmitted as a separate message to minimize
+            additional encoding.
         """
 
-        req_id = self.req_id_next()
+        req_id = self._req_id_next()
 
         if response:
             pending = Pending()
@@ -191,7 +191,7 @@ class Client:
             # We could be hard-nosed about it and throw an exception, but the
             # intent of looking for the ACK (is the server alive?) is moot if
             # we have a proper full response.
-            pending.complete(ack)
+            pending._complete(ack)
 
         elif ack_type != 'ACK':
             raise ValueError('expected an ACK response, got ' + ack_type)
@@ -204,9 +204,13 @@ class Client:
 
 class Pending:
     """ The :class:`Pending` provides a very thin wrapper around a
-        :class:`threading.Event` that can be used to signal the caller that the
-        request has been handled. It also provides a vehicle to pass the
-        response to the caller.
+        :class:`threading.Event`; it provides methods that allow a caller to
+        check whether a given request is complete, and to receive the result
+        of any such call.
+
+        :ivar ack: The acknowledgement that a request has been received.
+        :ivar bulk: The bulk data component, if any, of a response.
+        :ivar rep: The final response to a request.
     """
 
     def __init__(self):
@@ -217,7 +221,7 @@ class Pending:
         self.event_ack = threading.Event()
         self.event_rep = threading.Event()
 
-    def complete_ack(self, ack):
+    def _complete_ack(self, ack):
         """ Record the ACK response and signal any callers blocking on
             :func:`wait_ack` to proceed.
         """
@@ -225,7 +229,7 @@ class Pending:
         self.ack = ack
         self.event_ack.set()
 
-    def complete(self, response):
+    def _complete(self, response):
         """ If a response to a pending request arrives the :class:`client`
             instance will check whether the response is of interest, and if
             it is, call :func:`complete` to indicate the response has arrived.
@@ -239,7 +243,7 @@ class Pending:
 
         self.event_rep.set()
 
-    def partial(self, response=None, bulk=None):
+    def _partial(self, response=None, bulk=None):
         """ A response may come in two pieces. This is effectively a two-step
             version of :func:`complete`, where there should be two calls to
             :func:`partial` before a request is complete. This method will
@@ -269,12 +273,18 @@ class Pending:
 
 
     def wait_ack(self, timeout):
-        """ Block until the request has been acknowledged. """
+        """ Block until the request has been acknowledged. The acknowledgement
+            is always returned; the acknowledgement will be None if the original
+            request is still pending acknowledgement.
+        """
         self.event_ack.wait(timeout)
         return self.ack
 
     def wait(self, timeout=60):
-        """ Block until the request has been handled. """
+        """ Block until the request has been handled. The response to the
+            request is always returned; the response will be None if the
+            original request is still pending.
+        """
         self.event_rep.wait(timeout)
         return self.rep
 
@@ -289,6 +299,12 @@ class Server:
         assigned port. The *avoid* set enumerates port numbers that should
         not be automatically assigned; this is ignored if a fixed *port* is
         specified.
+
+        The hostname and port variables associated with a :class:`Server`
+        instance are key pieces of the provenance for an mKTL daemon.
+
+        :ivar hostname: The hostname on which this server can be contacted.
+        :ivar port: The port on which this server is listening for connections.
     """
 
     worker_count = 10
@@ -387,7 +403,7 @@ class Server:
 
         self.workers = list()
         for thread_number in range(self.worker_count):
-            thread = threading.Thread(target=self.worker_main)
+            thread = threading.Thread(target=self._worker_main)
             thread.daemon = True
             thread.start()
             self.workers.append(thread)
@@ -413,7 +429,10 @@ class Server:
 
     def req_handler(self, socket, lock, ident, request):
         """ The default request handler is for debug purposes only, and is
-            effectively a no-op.
+            effectively a no-op. :class:`mKTL.Daemon.Store` leverages a
+            custom subclass of :class:`Server` that properly handles specific
+            types of requests, since it needs to be aware of the actual
+            structure of what's happening in the daemon code.
         """
 
         self.req_ack(socket, lock, ident, request)
@@ -511,30 +530,28 @@ class Server:
 
     def send(self, ident, response):
         """ Convenience method for subclasses to fire off a message response.
-            Any such subclasses are not using the background threads to handle
-            requests, and are handling asynchronous responses that need to be
-            relayed back to the original caller. Otherwise, they would have a
-            reference to the lock and the socket, and would be making these
-            calls directly.
+            Any such subclasses are not using just the :func:`req_incoming`
+            and :func:`req_handler` background thread machinery defined
+            here to handle requests, and are handling asynchronous responses
+            that need to be relayed back to the original caller.
         """
 
         self.socket_lock.acquire()
         self.socket.send_multipart((ident, response))
         self.socket_lock.release()
 
-    def worker_main(self):
+    def _worker_main(self):
         """ This is the 'main' method for the worker threads responsible for
             handling incoming requests. The task of a worker thread is limited:
             receive a request, and feed it to :func:`req_incoming` for
             processing. Multiple threads are allocated to this function to
             allow for long-duration requests to be handled gracefully without
-            jamming up the processing of subsequent requests; simple round-robin
-            allocation of threads, as done by ROUTER/DEALER and PUSH/PULL, do
-            not alter their allocation of inbound messages if a thread is
-            already busy.
+            jamming up the processing of subsequent requests.
         """
 
         while not self.shutdown:
+            # The distribution of jobs is handled via a simple queue rather
+            # than a ZeroMQ construct, as the overall throughput was higher.
             try:
                 dequeued = self.queue.get(timeout=300)
             except queue.Empty:
@@ -549,8 +566,9 @@ class Server:
                 ### Proper error handling needs to go here.
                 print(traceback.format_exc())
 
-        # Make sure the queue has something in it to wake up the other
-        # worker threads if we're doing a controlled shutdown.
+        # self.shutdown is True. Ensure the queue has something in it to wake
+        # up the other worker threads, having None in the queue too many times
+        # is better than not having it there enough times.
 
         self.queue.put(None)
 
@@ -562,7 +580,9 @@ client_connections = dict()
 
 
 def client(address, port):
-    """ Factory function for a :class:`client` instance. """
+    """ Factory function for a :class:`client` instance.Use of this method is
+        encouraged to streamline re-use of established connections.
+    """
 
     try:
         instance = client_connections[(address, port)]
@@ -574,8 +594,9 @@ def client(address, port):
 
 
 def send(request, address, port):
-    """ Creates a :class:`client` instance and invokes the :func:`client.send`
-        method. This method blocks until the completion of the request.
+    """ Use :func:`client` to connect to the specified *address* and *port*,
+        and issue the specified *request*. This method blocks until the
+        completion of the request.
     """
 
     connection = client(address, port)
